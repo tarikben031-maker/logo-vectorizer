@@ -405,9 +405,12 @@
           const A = VV[mod(k - 1, m)].p, D = VV[(k + j + 1) % m].p;
           const pts_ = ids.map((i) => VV[i].p);
           let inner = 0; for (let q = 0; q < j; q++) inner += norm(sub(pts_[q + 1], pts_[q]));
-          if (inner > MERGE_LEN + 0.55 * (j - 1)) continue;
           const B = pts_[0], E = pts_[pts_.length - 1];
           const la = norm(sub(B, A)), ld = norm(sub(D, E));
+          if (inner > MERGE_LEN + 0.55 * (j - 1)) {
+            // wider antialias/noise split: only between long straight-ish edges
+            if (!(inner <= 1.8 + 0.4 * (j - 1) && Math.min(la, ld) >= Math.max(3.5, 3.5 * inner))) continue;
+          }
           if (j > 1 && (Math.min(la, ld) < 1.0 || Math.min(la, ld) < 1.5 * inner)) continue;
           const seq = [A].concat(pts_, [D]);
           let pos = true, neg = true;
@@ -469,8 +472,8 @@
       const a = Cpos.get(ka), b = Cpos.get(kb), d = sub(b, a);
       if (norm(d) < 0.6) return;
       const g = Math.atan2(Math.abs(d[1]), Math.abs(d[0])) * DEG;
-      if (g < AXIS_SNAP) { const y = (a[1] + b[1]) / 2; a[1] = b[1] = y; }
-      else if (g > 90 - AXIS_SNAP) { const x = (a[0] + b[0]) / 2; a[0] = b[0] = x; }
+      if (g < AXIS_SNAP && Math.abs(a[1] - b[1]) < 0.7) { const y = (a[1] + b[1]) / 2; a[1] = b[1] = y; }
+      else if (g > 90 - AXIS_SNAP && Math.abs(a[0] - b[0]) < 0.7) { const x = (a[0] + b[0]) / 2; a[0] = b[0] = x; }
     });
     const pos = (k) => (Cpos.has(k) ? Cpos.get(k) : V[k]);
     let out = 'M' + P2(Cpos.get(segs[0].ka));
@@ -479,7 +482,43 @@
       // long straight edges inside this curved run (stems, flats)
       const chain = [ka]; for (let q = 0; q < mod(kb - ka - 1, m); q++) chain.push((ka + 1 + q) % m); chain.push(kb);
       const lines = [];
+      const longLine = (c0, c1) => {
+        const u = chain[c0], w = chain[c1], pu = pos(u), pw = pos(w), L = norm(sub(pw, pu));
+        if (L < 8) return false;
+        for (let q = c0 + 1; q < c1; q++) {             // intermediate vertices must barely turn
+          const k = chain[q];
+          if (angleBetween(sub(V[k], V[mod(k - 1, m)]), sub(V[(k + 1) % m], V[k])) > 20) return false;
+        }
+        // every polygon edge in between must run in the line's direction (no wrapping round a tip)
+        const dir = unit(sub(pw, pu));
+        let turnSum = 0;
+        for (let q = c0; q < c1; q++) {
+          const e = sub(pos(chain[q + 1]), pos(chain[q]));
+          if (norm(e) > 0.8 && (dot(unit(e), dir) < Math.cos(15 / DEG))) return false;
+          if (q > c0) turnSum += sang(sub(pos(chain[q]), pos(chain[q - 1])), e);
+        }
+        if (Math.abs(turnSum) > 25) return false;
+        const rr = range(idxOut[u], idxIn[w], false);
+        const cut = Math.min(Math.floor(rr.length / 10), S);
+        const pts = rr.slice(cut, rr.length - cut).map((i) => P[i]);
+        if (pts.length < 3) return false;
+        // noise tolerance, but a real curve (radius < 150 px) stays a curve
+        const tol = Math.min(0.5, Math.max(0.35, (L * L) / (8 * 400)));
+        let pos_ = 0, neg_ = 0;
+        const v = sub(pw, pu);
+        for (const p of pts) {
+          const d = cross(v, sub(p, pu)) / L;
+          if (Math.abs(d) > tol) return false;
+          if (d > 0.08) pos_++; else if (d < -0.08) neg_++;
+        }
+        // systematic bulge on one side = gentle curve, not a straight edge
+        if (Math.max(pos_, neg_) > 0.7 * pts.length && lineDev(pts, pu, pw) > 0.18) return false;
+        return true;
+      };
       for (let c = 0; c < chain.length - 1; c++) {
+        let e = -1;
+        for (let c1 = chain.length - 1; c1 >= c + 2; c1--) if (longLine(c, c1)) { e = c1; break; }
+        if (e > 0) { lines.push([chain[c], chain[e]]); c = e - 1; continue; }
         const u = chain[c], w = chain[c + 1];
         const pu = pos(u), pw = pos(w), L = norm(sub(pw, pu));
         if (L < 2.5) continue;
@@ -506,8 +545,8 @@
         if (!Cpos.has(u)) Cpos.set(u, V[u].slice());
         if (!Cpos.has(w)) Cpos.set(w, V[w].slice());
         const cu = Cpos.get(u), cw = Cpos.get(w);
-        if (g < AXIS_SNAP) { const y = (cu[1] + cw[1]) / 2; cu[1] = cw[1] = y; }
-        else if (g > 90 - AXIS_SNAP) { const x = (cu[0] + cw[0]) / 2; cu[0] = cw[0] = x; }
+        if (g < AXIS_SNAP && Math.abs(cu[1] - cw[1]) < 0.7) { const y = (cu[1] + cw[1]) / 2; cu[1] = cw[1] = y; }
+        else if (g > 90 - AXIS_SNAP && Math.abs(cu[0] - cw[0]) < 0.7) { const x = (cu[0] + cw[0]) / 2; cu[0] = cw[0] = x; }
       }
       pieces.forEach(([kind, u, w], pi) => {
         const pa = pos(u), pb = pos(w);
