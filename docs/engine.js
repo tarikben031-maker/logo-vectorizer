@@ -16,6 +16,8 @@
   let ARC_RMAX = 25.0, BIG_ARCS = false;
   // precision profile: 'logo' (flat colours, maximum fidelity) or 'illus' (gradients, smoother curves)
   let DP_EPS = 0.2, FIT_TOL = 0.25, SMOOTH_MAX = 0.75;
+  let CLEAN_PX = (typeof process !== 'undefined' && process.env && process.env.VCP) ? +process.env.VCP : 0;
+  let LAYER_BLUR = (typeof process !== 'undefined' && process.env && process.env.VLB) ? +process.env.VLB : 0.7;
   function setProfile(illus) {
     if (illus) { DP_EPS = 0.45; FIT_TOL = 0.5; SMOOTH_MAX = 2.0; ARC_RMAX = 5000; BIG_ARCS = true; }
     else { DP_EPS = 0.2; FIT_TOL = 0.25; SMOOTH_MAX = 0.75; ARC_RMAX = 25.0; BIG_ARCS = false; }
@@ -753,6 +755,39 @@
     }
   }
 
+  function maxFilter(src, W, H, r) {
+    const tmp = new Float32Array(W * H), out = new Float32Array(W * H);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      let m = 0; const o = y * W;
+      for (let k = Math.max(0, x - r); k <= Math.min(W - 1, x + r); k++) if (src[o + k] > m) m = src[o + k];
+      tmp[o + x] = m;
+    }
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      let m = 0;
+      for (let k = Math.max(0, y - r); k <= Math.min(H - 1, y + r); k++) if (tmp[k * W + x] > m) m = tmp[k * W + x];
+      out[y * W + x] = m;
+    }
+    return out;
+  }
+
+  // Binary morphology on the supersampled mask (square element, separable, O(n))
+  function morph(mask, BW, BH, r, dilate) {
+    const tmp = new Uint8Array(BW * BH), row = new Int32Array(Math.max(BW, BH) + 1);
+    const pass = (src, dst, len, count, stride, lineStride) => {
+      for (let l = 0; l < count; l++) {
+        const base = l * lineStride;
+        row[0] = 0;
+        for (let k = 0; k < len; k++) row[k + 1] = row[k] + src[base + k * stride];
+        for (let k = 0; k < len; k++) {
+          const a = Math.max(0, k - r), b = Math.min(len, k + r + 1), sum = row[b] - row[a];
+          dst[base + k * stride] = dilate ? (sum > 0 ? 1 : 0) : (sum === b - a ? 1 : 0);
+        }
+      }
+    };
+    pass(mask, tmp, BW, BH, 1, BW);
+    pass(tmp, mask, BH, BW, BW, 1);
+  }
+
   // Border following (Suzuki & Abe 1985) -> list of closed borders (outer + holes), pixel coordinates
   function findContours(mask, BW, BH) {
     // states: 0 bg, 1 fg unvisited, 2 visited (positive), 3 visited with right neighbour bg (negative)
@@ -1040,10 +1075,16 @@
   }
 
   // Traces one coverage map t (0 = outside, 1 = inside) into SVG path data
-  function traceLayer(t, W, H, progress, label, minArea, fillGaps) {
+  function traceLayer(t, W, H, progress, label, minArea, fillGaps, cleanR = 0) {
     const BW = W * S, BH = H * S;
     const mask = coverageMask(t, W, H);
     blurThreshold(mask, BW, BH, S * MASK_BLUR);
+    if (cleanR > 0) {                 // remove burrs (opening) and nicks (closing) < ~2*cleanR subpixels
+      const r = cleanR;
+      for (let i = 0; i < mask.length; i++) mask[i] = mask[i] ? 1 : 0;
+      morph(mask, BW, BH, r, false); morph(mask, BW, BH, r, true);
+      morph(mask, BW, BH, r, true); morph(mask, BW, BH, r, false);
+    }
     const contours = findContours(mask, BW, BH).filter((c) => c.length >= 3);
     const paths = [];
     let done = 0;
@@ -1188,7 +1229,24 @@
     const tsilSmooth = illus ? blurFloat(tsil, W, H, 0.6) : null;
     const K = pal.length, weight = new Float64Array(K);
     for (let i = 0; i < N; i++) { weight[ia[i]] += al[i]; weight[ib[i]] += 1 - al[i]; }
-    const order = [...Array(K).keys()].slice(1).sort((p, q) => weight[q] - weight[p]);
+    let order = [...Array(K).keys()].slice(1).sort((p, q) => weight[q] - weight[p]);
+    let minGap = Infinity;
+    for (let a = 1; a < K; a++) for (let b = a + 1; b < K; b++)
+      minGap = Math.min(minGap, Math.hypot(pal[a][0] - pal[b][0], pal[a][1] - pal[b][1], pal[a][2] - pal[b][2]));
+    // clearly distinct colours (not shades of one gradient): own-colour layers, thin strokes on top
+    const flatStack = !illus && K > 2 && minGap > 90;
+    if (flatStack) {
+      // flat colours: thick fills at the bottom, thin strokes on top (their own edges stay visible)
+      const area = new Float64Array(K), per = new Float64Array(K);
+      const hard = (i) => (al[i] >= 0.5 ? ia[i] : ib[i]);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const i = y * W + x, c = hard(i); area[c]++;
+        if (x + 1 < W) { const d = hard(i + 1); if (d !== c) { per[c]++; per[d]++; } }
+        if (y + 1 < H) { const d = hard(i + W); if (d !== c) { per[c]++; per[d]++; } }
+      }
+      const thick = (c) => area[c] / Math.max(1, per[c]);
+      order = order.slice().sort((p, q) => thick(q) - thick(p));
+    }
     // supersampling factor under the memory guard
     S = pal.length > 7 ? 6 : 8;                // many colours: slightly lower supersampling (speed)
     while (S > 3 && N * S * S > MAX_SUBPIXELS) S--;
@@ -1203,10 +1261,25 @@
       if (illus) {
         if (L === 0) t.set(tsilSmooth);
         else { const tb = blurFloat(t, W, H, 0.9); for (let i = 0; i < N; i++) t[i] = Math.min(tb[i], tsilSmooth[i]); }
+      } else if (K0 > 2) {
+        if (!flatStack && LAYER_BLUR > 0) t.set(blurFloat(t, W, H, LAYER_BLUR));     // removes burrs from colour noise
+        if (flatStack) {
+          // own colour only, then gap filler: extend by <= 2 px into upper colours / the halo next to them
+          const own = new Float32Array(N), up = new Float32Array(N);
+          for (let i = 0; i < N; i++) {
+            own[i] = al[i] * (rank[ia[i]] === L ? 1 : 0) + (1 - al[i]) * (rank[ib[i]] === L ? 1 : 0);
+            up[i] = al[i] * (rank[ia[i]] > L ? 1 : 0) + (1 - al[i]) * (rank[ib[i]] > L ? 1 : 0);
+          }
+          const ob = LAYER_BLUR > 0 ? blurFloat(own, W, H, LAYER_BLUR) : own;
+          if (L < order.length - 1) {
+            const mine = maxFilter(ob, W, H, 2), near = L === 0 ? maxFilter(up, W, H, 1) : up;
+            for (let i = 0; i < N; i++) t[i] = Math.max(ob[i], Math.min(mine[i], near[i]));
+          } else t.set(ob);
+        }
       }
       const label = order.length > 1 ? `Couleur ${L + 1}/${order.length} — ` : 'Tracé des courbes… ';
       progress(label);
-      const paths = traceLayer(t, W, H, progress, label, illus ? 4 : 0.8, L === 0 && order.length > 1);
+      const paths = traceLayer(t, W, H, progress, label, illus ? 4 : 0.8, L === 0 && order.length > 1, K0 > 2 && !illus ? Math.round(S * CLEAN_PX) : 0);
       if (paths.length) layers.push({ color: hex(pal[order[L]]), paths });
     }
     if (!layers.length) throw new Error("L'image ne contient pas de logo visible (une seule couleur).");
