@@ -984,11 +984,44 @@
     }
     const ia = new Uint8Array(N), ib = new Uint8Array(N), al = new Float32Array(N);
     const present = new Uint8Array(K);
+    // "flat" pixels (not on an edge): only their colours are real candidates. Blended edge pixels
+    // can look like a third colour (e.g. white+red looks peach) and must not add it.
+    const flat = new Uint8Array(N);
+    for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+      const i = y * W + x; let dmax = 0;
+      for (const j of [i - 1, i + 1, i - W, i + W]) {
+        const d = Math.abs(rgb[i * 3] - rgb[j * 3]) + Math.abs(rgb[i * 3 + 1] - rgb[j * 3 + 1]) + Math.abs(rgb[i * 3 + 2] - rgb[j * 3 + 2]);
+        if (d > dmax) dmax = d;
+      }
+      flat[i] = dmax <= 30 ? 1 : 0;
+    }
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
       const i = y * W + x;
       present.fill(0);
-      for (let dy = -2; dy <= 2; dy++) { const yy = y + dy; if (yy < 0 || yy >= H) continue;
-        for (let dx = -2; dx <= 2; dx++) { const xx = x + dx; if (xx < 0 || xx >= W) continue; present[lbl[yy * W + xx]] = 1; } }
+      let nflat = 0;
+      for (let dy = -3; dy <= 3; dy++) { const yy = y + dy; if (yy < 0 || yy >= H) continue;
+        for (let dx = -3; dx <= 3; dx++) { const xx = x + dx; if (xx < 0 || xx >= W) continue;
+          const j = yy * W + xx; if (flat[j]) { present[lbl[j]] = 1; nflat++; } } }
+      if (!nflat) {
+        for (let dy = -2; dy <= 2; dy++) { const yy = y + dy; if (yy < 0 || yy >= H) continue;
+          for (let dx = -2; dx <= 2; dx++) { const xx = x + dx; if (xx < 0 || xx >= W) continue; present[lbl[yy * W + xx]] = 1; } }
+      }
+      // the pixel must be explainable by the candidates; otherwise add its own colour and neighbours'
+      {
+        const r = rgb[i * 3], g = rgb[i * 3 + 1], b = rgb[i * 3 + 2];
+        let e = Infinity;
+        const cl0 = []; for (let c = 0; c < K; c++) if (present[c]) cl0.push(c);
+        for (let u = 0; u < cl0.length; u++) for (let v = u; v < cl0.length; v++) {
+          const A = pal[cl0[u]], B = pal[cl0[v]], d0 = A[0] - B[0], d1 = A[1] - B[1], d2 = A[2] - B[2], dd = d0 * d0 + d1 * d1 + d2 * d2;
+          const vx = r - B[0], vy = g - B[1], vz = b - B[2];
+          const t = dd > 0 ? clip((vx * d0 + vy * d1 + vz * d2) / dd, 0, 1) : 1;
+          e = Math.min(e, (vx - t * d0) ** 2 + (vy - t * d1) ** 2 + (vz - t * d2) ** 2);
+        }
+        if (e > 30 * 30) {
+          for (let dy = -2; dy <= 2; dy++) { const yy = y + dy; if (yy < 0 || yy >= H) continue;
+            for (let dx = -2; dx <= 2; dx++) { const xx = x + dx; if (xx < 0 || xx >= W) continue; present[lbl[yy * W + xx]] = 1; } }
+        }
+      }
       const cl = []; for (let c = 0; c < K; c++) if (present[c]) cl.push(c);
       if (cl.length === 1) { ia[i] = ib[i] = cl[0]; al[i] = 1; continue; }
       const r = rgb[i * 3], g = rgb[i * 3 + 1], b = rgb[i * 3 + 2];
@@ -1001,7 +1034,7 @@
         if (e < best) { best = e; ia[i] = cl[u]; ib[i] = cl[v]; al[i] = t; }
       }
       // pixels deep inside a denoised area keep that colour (noise in light areas)
-      if (cl.length === 2 && lbl[i] !== ia[i] && lbl[i] !== ib[i]) { ia[i] = ib[i] = lbl[i]; al[i] = 1; }
+      if (flat[i] && cl.length === 2 && lbl[i] !== ia[i] && lbl[i] !== ib[i] && present[lbl[i]]) { ia[i] = ib[i] = lbl[i]; al[i] = 1; }
     }
     return { ia, ib, al };
   }
