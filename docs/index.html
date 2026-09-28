@@ -120,7 +120,7 @@
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
     <strong>Déposez votre logo ici</strong>
     <span>ou cliquez pour choisir un fichier — vous pouvez aussi coller (Ctrl+V)</span>
-    <span>PNG, JPG ou WebP · logos à 2 couleurs (fond + une couleur)</span>
+    <span>PNG, JPG ou WebP · jusqu'à 8 couleurs</span>
     <input id="file" type="file" accept="image/png,image/jpeg,image/webp" hidden>
   </label>
 
@@ -129,7 +129,8 @@
   <section id="result" class="card" aria-live="polite">
     <div class="toolbar">
       <div class="group">
-        <label title="Couleur du logo">Logo <input id="fg" type="color"></label>
+        <span style="font-size:14px;color:var(--muted)">Couleurs</span>
+        <span id="colors" class="group"></span>
         <label title="Couleur du fond">Fond <input id="bg" type="color"></label>
         <label><input id="transparent" type="checkbox"> Fond transparent</label>
       </div>
@@ -217,12 +218,15 @@
       stage = 'Vectorisation…'; show();
       const json = await runWorker(img, (msg) => { stage = msg; show(); });
       state.data = json;
-      $('fg').value = json.fg; $('bg').value = json.bg; $('transparent').checked = false;
+      const colors = json.colors || [json.fg];
+      $('colors').innerHTML = colors.map((c, i) => `<input type="color" data-layer="${i}" value="${c}" title="Couleur ${i + 1}">`).join('');
+      $('bg').value = json.bg; $('transparent').checked = false;
       $('orig').src = state.origUrl;
       render();
-      $('stats').innerHTML = `<span><b>${json.width} × ${json.height}</b> px</span><span><b>${json.shapes}</b> formes</span><span><b>${json.arcs}</b> cercles exacts</span><span>calcul <b>${(json.ms / 1000).toFixed(1)} s</b></span>`;
+      $('stats').innerHTML = `<span><b>${json.width} × ${json.height}</b> px</span><span><b>${(json.colors || [1]).length}</b> couleur${(json.colors || [1]).length > 1 ? 's' : ''}</span><span><b>${json.shapes}</b> formes</span><span><b>${json.arcs}</b> cercles exacts</span><span>calcul <b>${(json.ms / 1000).toFixed(1)} s</b></span>`;
       clearStatus();
       $('result').classList.add('show');
+      applyZoom();                       // sizes depend on the now-visible panes
       $('result').scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch (e) {
       setStatus(e.message && !/decode|source image/i.test(e.message) ? e.message : 'Impossible de lire cette image. Utilisez un PNG, JPG ou WebP.', 'error');
@@ -234,7 +238,8 @@
     const d = state.data; if (!d) return '';
     const doc = new DOMParser().parseFromString(d.svg, 'image/svg+xml');
     const svg = doc.documentElement;
-    svg.querySelector('path').setAttribute('fill', $('fg').value);
+    const inputs = [...$('colors').querySelectorAll('input')];
+    svg.querySelectorAll('path').forEach((p, i) => { if (inputs[i]) p.setAttribute('fill', inputs[i].value); });
     const rect = svg.querySelector('rect');
     if ($('transparent').checked) rect.remove(); else rect.setAttribute('fill', $('bg').value);
     return new XMLSerializer().serializeToString(svg);
@@ -276,7 +281,7 @@
     applyZoom();
     for (const v of [$('viewA'), $('viewB')]) { v.scrollLeft = (v.scrollWidth - v.clientWidth) / 2; v.scrollTop = (v.scrollHeight - v.clientHeight) / 2; }
   });
-  for (const id of ['fg', 'bg', 'transparent']) $(id).addEventListener('input', render);
+  for (const id of ['colors', 'bg', 'transparent']) $(id).addEventListener('input', render);
   window.addEventListener('resize', applyZoom);
 
   function download(blob, name) {

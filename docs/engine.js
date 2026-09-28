@@ -758,57 +758,78 @@
   }
   const hex = (c) => '#' + c.map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
 
-  // ---------------------------------------------------------------- main entry
-  function vectorizeRGBA(rgba, W, H, onProgress) {
-    const t0 = Date.now();
-    const progress = (msg) => { if (onProgress) onProgress(msg); };
-    const N = W * H;
-    // colours
-    const bord = [[], [], [], []];
-    const pushB = (x, y) => { const o = (y * W + x) * 4; for (let c = 0; c < 4; c++) bord[c].push(rgba[o + c]); };
-    for (let x = 0; x < W; x++) { pushB(x, 0); pushB(x, H - 1); }
-    for (let y = 0; y < H; y++) { pushB(0, y); pushB(W - 1, y); }
-    let bgc = [median(bord[0]), median(bord[1]), median(bord[2])];
-    let amean = 0; for (let i = 0; i < N; i++) amean += rgba[i * 4 + 3];
-    amean /= N * 255;
-    const topBottomAlpha = []; for (let x = 0; x < W; x++) { topBottomAlpha.push(rgba[x * 4 + 3], rgba[((H - 1) * W + x) * 4 + 3]); }
-    if (amean < 0.999 && median(topBottomAlpha) < 128) bgc = [255, 255, 255];
-    const rgb = new Float32Array(N * 3), dist = new Float32Array(N);
-    let dmax = 0;
-    for (let i = 0; i < N; i++) {
-      const a = rgba[i * 4 + 3] / 255;
-      let d2 = 0;
-      for (let c = 0; c < 3; c++) { const v = rgba[i * 4 + c] * a + bgc[c] * (1 - a); rgb[i * 3 + c] = v; d2 += (v - bgc[c]) ** 2; }
-      dist[i] = Math.sqrt(d2); if (dist[i] > dmax) dmax = dist[i];
+  // ---------------------------------------------------------------- palette (multi-colour)
+  // Finds the real colours of the logo from "flat" pixels (antialiased edge pixels are ignored).
+  function findPalette(rgb, W, H, maxColors) {
+    const N = W * H, flat = new Uint8Array(N);
+    for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+      const i = y * W + x; let dmax = 0;
+      for (const j of [i - 1, i + 1, i - W, i + W, i - W - 1, i - W + 1, i + W - 1, i + W + 1]) {
+        const d = Math.abs(rgb[i * 3] - rgb[j * 3]) + Math.abs(rgb[i * 3 + 1] - rgb[j * 3 + 1]) + Math.abs(rgb[i * 3 + 2] - rgb[j * 3 + 2]);
+        if (d > dmax) dmax = d;
+      }
+      if (dmax <= 24) flat[i] = 1;
     }
-    if (dmax < 30) throw new Error("L'image ne contient pas de logo visible (une seule couleur).");
-    const fgs = [[], [], []];
-    for (let i = 0; i < N; i++) if (dist[i] > 0.8 * dmax) for (let c = 0; c < 3; c++) fgs[c].push(rgb[i * 3 + c]);
-    const fgc = fgs.map(median);
-    const v = [fgc[0] - bgc[0], fgc[1] - bgc[1], fgc[2] - bgc[2]], vv = v[0] ** 2 + v[1] ** 2 + v[2] ** 2;
-    const t = new Float32Array(N);
+    const bins = new Map(); let nFlat = 0;
     for (let i = 0; i < N; i++) {
-      const p = ((rgb[i * 3] - bgc[0]) * v[0] + (rgb[i * 3 + 1] - bgc[1]) * v[1] + (rgb[i * 3 + 2] - bgc[2]) * v[2]) / vv;
-      t[i] = clip(p, 0, 1);
+      if (!flat[i]) continue; nFlat++;
+      const r = rgb[i * 3], g = rgb[i * 3 + 1], b = rgb[i * 3 + 2];
+      const key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+      let e = bins.get(key); if (!e) { e = [0, 0, 0, 0]; bins.set(key, e); }
+      e[0]++; e[1] += r; e[2] += g; e[3] += b;
     }
-    // supersampling factor under the memory guard
-    S = 8;
-    while (S > 3 && N * S * S > MAX_SUBPIXELS) S--;
-    ARCS = 0; USE_ARCS = true;
-    progress('Analyse des contours…');
+    const sorted = [...bins.values()].sort((p, q) => q[0] - p[0]);
+    const clusters = [];                  // [count, r, g, b] (sums)
+    const MERGE = 40;
+    for (const e of sorted) {
+      const c = [e[1] / e[0], e[2] / e[0], e[3] / e[0]];
+      let best = null, bd = Infinity;
+      for (const k of clusters) {
+        const d = Math.hypot(k[1] / k[0] - c[0], k[2] / k[0] - c[1], k[3] / k[0] - c[2]);
+        if (d < bd) { bd = d; best = k; }
+      }
+      if (best && bd < MERGE) { best[0] += e[0]; best[1] += e[1]; best[2] += e[2]; best[3] += e[3]; }
+      else clusters.push(e.slice());
+    }
+    const minCount = Math.max(20, 0.0008 * nFlat);
+    return clusters.filter((k) => k[0] >= minCount).sort((p, q) => q[0] - p[0]).slice(0, maxColors)
+      .map((k) => [k[1] / k[0], k[2] / k[0], k[3] / k[0]]);
+  }
+
+  // Each pixel = mix of two palette colours: returns colour indices + mixing weight
+  function decompose(rgb, N, pal) {
+    const K = pal.length, ia = new Uint8Array(N), ib = new Uint8Array(N), al = new Float32Array(N);
+    const pairs = [];
+    for (let a = 0; a < K; a++) for (let b = a + 1; b < K; b++) {
+      const d = [pal[a][0] - pal[b][0], pal[a][1] - pal[b][1], pal[a][2] - pal[b][2]];
+      pairs.push([a, b, d, d[0] * d[0] + d[1] * d[1] + d[2] * d[2]]);
+    }
+    for (let i = 0; i < N; i++) {
+      const r = rgb[i * 3], g = rgb[i * 3 + 1], bl = rgb[i * 3 + 2];
+      let best = Infinity;
+      for (const [a, b, d, dd] of pairs) {
+        const pb = pal[b], vx = r - pb[0], vy = g - pb[1], vz = bl - pb[2];
+        const t = dd > 0 ? clip((vx * d[0] + vy * d[1] + vz * d[2]) / dd, 0, 1) : 0;
+        const ex = vx - t * d[0], ey = vy - t * d[1], ez = vz - t * d[2], e = ex * ex + ey * ey + ez * ez;
+        if (e < best) { best = e; ia[i] = a; ib[i] = b; al[i] = t; }
+      }
+    }
+    return { ia, ib, al };
+  }
+
+  // Traces one coverage map t (0 = outside, 1 = inside) into SVG path data
+  function traceLayer(t, W, H, progress, label) {
     const BW = W * S, BH = H * S;
     const mask = coverageMask(t, W, H);
     blurThreshold(mask, BW, BH, S * MASK_BLUR);
-    const contours = findContours(mask, BW, BH);
-    progress('Tracé des courbes…');
+    const contours = findContours(mask, BW, BH).filter((c) => c.length >= 3);
     const paths = [];
     let done = 0;
-    const big = contours.filter((c) => c.length >= 3);
-    for (const c of big) {
+    for (const c of contours) {
+      done++;
       let a2 = 0;
       for (let i = 0; i < c.length; i++) { const p = c[i], q = c[(i + 1) % c.length]; a2 += p[0] * q[1] - q[0] * p[1]; }
       const areaPx = Math.abs(a2 / 2);
-      done++;
       if (areaPx < S * S * 0.8) continue;
       const a0 = areaPx / S / S;
       const raw = c.map((p) => [(p[0] + 0.5) / S, (p[1] + 0.5) / S]);
@@ -821,15 +842,70 @@
         if (d2 !== null && (d === null || Math.abs(pathArea(d2) - a0) < Math.abs(pathArea(d) - a0))) d = d2;
       }
       if (d) paths.push(d);
-      if (done % 10 === 0) progress(`Tracé des courbes… ${Math.round(100 * done / big.length)} %`);
+      if (done % 10 === 0) progress(`${label}${Math.round(100 * done / contours.length)} %`);
     }
-    const fg = hex(fgc), bg = hex(bgc);
-    const body = `<path fill="${fg}" fill-rule="evenodd" d="${paths.join('')}"/>`;
+    return paths;
+  }
+
+  // ---------------------------------------------------------------- main entry
+  function vectorizeRGBA(rgba, W, H, onProgress, opts) {
+    const t0 = Date.now();
+    const progress = (msg) => { if (onProgress) onProgress(msg); };
+    const maxColors = (opts && opts.maxColors) || 8;
+    const N = W * H;
+    // background colour from the border (white for transparent images)
+    const bord = [[], [], []];
+    const pushB = (x, y) => { const o = (y * W + x) * 4; for (let c = 0; c < 3; c++) bord[c].push(rgba[o + c]); };
+    for (let x = 0; x < W; x++) { pushB(x, 0); pushB(x, H - 1); }
+    for (let y = 0; y < H; y++) { pushB(0, y); pushB(W - 1, y); }
+    let bgc = [median(bord[0]), median(bord[1]), median(bord[2])];
+    let amean = 0; for (let i = 0; i < N; i++) amean += rgba[i * 4 + 3];
+    amean /= N * 255;
+    const topBottomAlpha = []; for (let x = 0; x < W; x++) { topBottomAlpha.push(rgba[x * 4 + 3], rgba[((H - 1) * W + x) * 4 + 3]); }
+    if (amean < 0.999 && median(topBottomAlpha) < 128) bgc = [255, 255, 255];
+    const rgb = new Float32Array(N * 3);
+    for (let i = 0; i < N; i++) {
+      const a = rgba[i * 4 + 3] / 255;
+      for (let c = 0; c < 3; c++) rgb[i * 3 + c] = rgba[i * 4 + c] * a + bgc[c] * (1 - a);
+    }
+    progress('Détection des couleurs…');
+    let pal = findPalette(rgb, W, H, maxColors);
+    // put the background colour first (closest palette colour to the border colour)
+    let bi = 0, bd = Infinity;
+    pal.forEach((c, i) => { const d = Math.hypot(c[0] - bgc[0], c[1] - bgc[1], c[2] - bgc[2]); if (d < bd) { bd = d; bi = i; } });
+    if (bd > 40) { pal.unshift(bgc.slice()); bi = 0; }
+    pal = [pal[bi]].concat(pal.filter((_, i) => i !== bi));
+    if (pal.length < 2) throw new Error("L'image ne contient pas de logo visible (une seule couleur).");
+    const { ia, ib, al } = decompose(rgb, N, pal);
+    // stacking order: largest colours at the bottom, smaller details on top
+    const K = pal.length, weight = new Float64Array(K);
+    for (let i = 0; i < N; i++) { weight[ia[i]] += al[i]; weight[ib[i]] += 1 - al[i]; }
+    const order = [...Array(K).keys()].slice(1).sort((p, q) => weight[q] - weight[p]);
+    // supersampling factor under the memory guard
+    S = 8;
+    while (S > 3 && N * S * S > MAX_SUBPIXELS) S--;
+    ARCS = 0; USE_ARCS = true;
+    const layers = [];
+    const rank = new Int32Array(K).fill(-1);
+    order.forEach((c, r) => { rank[c] = r; });
+    const t = new Float32Array(N);
+    for (let L = 0; L < order.length; L++) {
+      // layer L covers its own colour and every colour stacked above it (no gaps between colours)
+      for (let i = 0; i < N; i++) t[i] = al[i] * (rank[ia[i]] >= L ? 1 : 0) + (1 - al[i]) * (rank[ib[i]] >= L ? 1 : 0);
+      const label = order.length > 1 ? `Couleur ${L + 1}/${order.length} — ` : 'Tracé des courbes… ';
+      progress(label);
+      const paths = traceLayer(t, W, H, progress, label);
+      if (paths.length) layers.push({ color: hex(pal[order[L]]), paths });
+    }
+    if (!layers.length) throw new Error("L'image ne contient pas de logo visible (une seule couleur).");
+    const bg = hex(pal[0]);
+    const body = layers.map((l) => `<path fill="${l.color}" fill-rule="evenodd" d="${l.paths.join('')}"/>`).join('');
     const head = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">`;
     return {
       svg: head + `<rect width="${W}" height="${H}" fill="${bg}"/>` + body + '</svg>',
       svg_transparent: head + body + '</svg>',
-      width: W, height: H, fg, bg, shapes: paths.length, arcs: ARCS, ms: Date.now() - t0,
+      width: W, height: H, bg, fg: layers[0].color, colors: layers.map((l) => l.color),
+      shapes: layers.reduce((n, l) => n + l.paths.length, 0), arcs: ARCS, ms: Date.now() - t0,
     };
   }
 

@@ -1,6 +1,6 @@
 # Vectoriseur de logos
 
-Site + API qui transforme un logo PNG/JPG (2 couleurs : fond + une couleur) en SVG propre :
+Site + API qui transforme un logo PNG/JPG en SVG propre :
 angles nets, lignes droites, cercles parfaits, courbes lisses.
 100 % algorithmique : pas de clé API, pas de coût par image.
 
@@ -8,6 +8,8 @@ angles nets, lignes droites, cercles parfaits, courbes lisses.
 
 - **`docs/` — version navigateur (recommandée)** : tout tourne dans le navigateur du visiteur
   (JavaScript + Web Worker). Aucun serveur, aucune limite, gratuit, images jamais envoyées.
+  **Multicolore** : détecte jusqu'à 8 couleurs et trace une couche par couleur, empilées sans
+  jour entre les couleurs ; chaque couleur est modifiable avant le téléchargement.
   Hébergement : **GitHub Pages**.
 - **Racine — version serveur** (FastAPI, pour Vercel) : même algorithme en Python, avec une API HTTP.
 
@@ -68,7 +70,7 @@ curl -X POST --data-binary @logo.png "https://VOTRE-SITE.vercel.app/api/vectoriz
 
 ## Limites
 
-- Logos à **2 couleurs** (fond + une couleur). Les logos multicolores ne sont pas encore gérés.
+- Version serveur (Python) : logos à **2 couleurs** (fond + une couleur). La version navigateur gère jusqu'à 8 couleurs.
 - Image max **4,4 Mo** (limite Vercel) ; le site réduit automatiquement les images plus lourdes.
   Les images de plus de 3000 px sont réduites à 3000 px avant la vectorisation.
 - Temps de calcul : 2 à 15 s selon la taille du logo.
