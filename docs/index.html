@@ -264,7 +264,7 @@
   <footer>Vectoriseur de logos · tout se passe dans votre navigateur</footer>
 </div>
 
-<script src="exporters.js?v=202609282352"></script>
+<script src="exporters.js?v=202609282358"></script>
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -292,7 +292,7 @@
 
   function runWorker(img, onProgress) {
     return new Promise((resolve, reject) => {
-      const worker = new Worker('worker.js?v=202609282352');
+      const worker = new Worker('worker.js?v=202609282358');
       worker.onmessage = (e) => {
         const m = e.data;
         if (m.type === 'progress') onProgress(m.msg);

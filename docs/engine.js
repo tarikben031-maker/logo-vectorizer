@@ -17,6 +17,7 @@
   // precision profile: 'logo' (flat colours, maximum fidelity) or 'illus' (gradients, smoother curves)
   let DP_EPS = 0.2, FIT_TOL = 0.25, SMOOTH_MAX = 0.75;
   let CLEAN_PX = (typeof process !== 'undefined' && process.env && process.env.VCP) ? +process.env.VCP : 0;
+  let CUR_T = null, CUR_W = 0, CUR_H = 0;
   let TIP_REBUILD = !((typeof process !== 'undefined' && process.env && process.env.VNOTIP));
   let LAYER_BLUR = (typeof process !== 'undefined' && process.env && process.env.VLB) ? +process.env.VLB : 0.7;
   function setProfile(illus) {
@@ -436,6 +437,17 @@
           const lim = tipMode ? (tot > 125 ? Math.min(4.5, Math.max(1.4, 0.4 * Math.min(la, ld))) : Math.min(2.2, Math.max(0.9, 0.35 * Math.min(la, ld)))) : (tot <= 150 ? 0.75 : 1.4);
           let md = Infinity; for (const p of pts_) md = Math.min(md, norm(sub(p, x)));
           if (md > lim) continue;
+          if (tipMode && CUR_T) {
+            // the rebuilt tip must lie on pixels that really carry this colour (no spikes into other colours)
+            const mid = [(B[0] + E[0]) / 2, (B[1] + E[1]) / 2];
+            let acc = 0, n = 0;
+            for (let q = 1; q <= 6; q++) {
+              const px = mid[0] + (x[0] - mid[0]) * q / 6, py = mid[1] + (x[1] - mid[1]) * q / 6;
+              const ix = Math.min(CUR_W - 1, Math.max(0, Math.floor(px))), iy = Math.min(CUR_H - 1, Math.max(0, Math.floor(py)));
+              acc += CUR_T[iy * CUR_W + ix]; n++;
+            }
+            if (acc / n < 0.3) continue;
+          }
           const score = inner / j;
           if (!best || score < best.score) best = { score, ids, x };
         }
@@ -1040,6 +1052,38 @@
     return { ia, ib, al };
   }
 
+  // Colour patches smaller than minSize pixels (slivers where 3 colours meet) take the colour around them
+  function absorbSpecks(lbl, W, H, K, minSize) {
+    const N = W * H, comp = new Int32Array(N).fill(-1), stack = new Int32Array(N), members = [];
+    const nb = new Int32Array(K);
+    for (let s0 = 0; s0 < N; s0++) {
+      if (comp[s0] >= 0) continue;
+      const c = lbl[s0]; let sp = 0, cnt = 0; stack[sp++] = s0; comp[s0] = s0; members.length = 0;
+      let big = false;
+      while (sp) {
+        const i = stack[--sp]; if (!big) members.push(i); cnt++;
+        if (cnt >= minSize) big = true;
+        const x = i % W, y = (i / W) | 0;
+        if (x > 0 && comp[i - 1] < 0 && lbl[i - 1] === c) { comp[i - 1] = s0; stack[sp++] = i - 1; }
+        if (x < W - 1 && comp[i + 1] < 0 && lbl[i + 1] === c) { comp[i + 1] = s0; stack[sp++] = i + 1; }
+        if (y > 0 && comp[i - W] < 0 && lbl[i - W] === c) { comp[i - W] = s0; stack[sp++] = i - W; }
+        if (y < H - 1 && comp[i + W] < 0 && lbl[i + W] === c) { comp[i + W] = s0; stack[sp++] = i + W; }
+      }
+      if (big) continue;
+      nb.fill(0);
+      for (const i of members) {
+        const x = i % W, y = (i / W) | 0;
+        if (x > 0 && lbl[i - 1] !== c) nb[lbl[i - 1]]++;
+        if (x < W - 1 && lbl[i + 1] !== c) nb[lbl[i + 1]]++;
+        if (y > 0 && lbl[i - W] !== c) nb[lbl[i - W]]++;
+        if (y < H - 1 && lbl[i + W] !== c) nb[lbl[i + W]]++;
+      }
+      let m = -1, mv = 0; for (let k = 0; k < K; k++) if (nb[k] > mv) { mv = nb[k]; m = k; }
+      if (m >= 0) for (const i of members) lbl[i] = m;
+    }
+    return lbl;
+  }
+
   // Like decompose(), but each pixel may only mix colours present around it (5x5, after denoising):
   // prevents fringes of a third colour along edges and noise specks inside light areas.
   function decomposeLocal(rgb, W, H, pal) {
@@ -1061,6 +1105,7 @@
       }
       lbl = out;
     }
+    lbl = absorbSpecks(lbl, W, H, K, 8);
     const ia = new Uint8Array(N), ib = new Uint8Array(N), al = new Float32Array(N);
     const present = new Uint8Array(K);
     // "flat" pixels (not on an edge): only their colours are real candidates. Blended edge pixels
@@ -1120,6 +1165,7 @@
 
   // Traces one coverage map t (0 = outside, 1 = inside) into SVG path data
   function traceLayer(t, W, H, progress, label, minArea, fillGaps, cleanR = 0) {
+    CUR_T = t; CUR_W = W; CUR_H = H;
     const BW = W * S, BH = H * S;
     const mask = coverageMask(t, W, H);
     blurThreshold(mask, BW, BH, S * MASK_BLUR);
