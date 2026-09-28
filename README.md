@@ -4,7 +4,22 @@ Site + API qui transforme un logo PNG/JPG (2 couleurs : fond + une couleur) en S
 angles nets, lignes droites, cercles parfaits, courbes lisses.
 100 % algorithmique : pas de clé API, pas de coût par image.
 
-## Contenu
+## Deux versions
+
+- **`docs/` — version navigateur (recommandée)** : tout tourne dans le navigateur du visiteur
+  (JavaScript + Web Worker). Aucun serveur, aucune limite, gratuit, images jamais envoyées.
+  Hébergement : **GitHub Pages**.
+- **Racine — version serveur** (FastAPI, pour Vercel) : même algorithme en Python, avec une API HTTP.
+
+## Mettre en ligne la version navigateur (GitHub Pages)
+
+1. Sur GitHub, ouvrez le dépôt → **Settings** → **Pages** (menu de gauche).
+2. **Source** : *Deploy from a branch*. **Branch** : `main`, dossier **`/docs`** → **Save**.
+3. Après 1 à 2 minutes, le site est en ligne sur `https://<votre-compte>.github.io/logo-vectorizer/`.
+
+Fichiers : `docs/index.html` (interface), `docs/engine.js` (moteur), `docs/worker.js` (calcul en arrière-plan).
+
+## Contenu de la version serveur
 
 | Fichier | Rôle |
 |---|---|

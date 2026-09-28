@@ -1,0 +1,839 @@
+/* Logo vectorizer engine (JavaScript port of vectorizer.py).
+ * Two-colour raster logo -> clean SVG: sharp corners, straight stems, exact circles, smooth curves.
+ *
+ *   LogoVectorizer.vectorizeRGBA(rgba: Uint8ClampedArray|Uint8Array, width, height, onProgress?)
+ *     -> { svg, svg_transparent, width, height, fg, bg, shapes, arcs, ms }
+ *
+ * Pipeline: colour separation -> coverage-aware subpixel mask -> Gaussian smoothing -> border
+ * following (Suzuki) -> Douglas-Peucker polygon -> corner detection + merging of antialias-split
+ * corners -> exact straight lines (axis snap) -> exact circular arcs -> Schneider Bezier fitting
+ * -> per-shape area safety check.
+ */
+(function (root) {
+  'use strict';
+
+  const DP_EPS = 0.2, FIT_TOL = 0.25, LINE_TOL = 0.2, AXIS_SNAP = 2.5, MERGE_LEN = 0.9;
+  const SMOOTH_MAX = 0.75, ARC_RMAX = 25.0, MASK_BLUR = 0.35;
+  const MAX_SUBPIXELS = 110e6;       // memory guard for the supersampled mask
+  const DEG = 180 / Math.PI;
+
+  let S = 8;                         // supersampling factor (lowered for very large images)
+  let ARCS = 0;
+  let USE_ARCS = true;
+
+  // ---------------------------------------------------------------- vector helpers
+  const sub = (a, b) => [a[0] - b[0], a[1] - b[1]];
+  const add = (a, b) => [a[0] + b[0], a[1] + b[1]];
+  const mul = (a, k) => [a[0] * k, a[1] * k];
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1];
+  const cross = (a, b) => a[0] * b[1] - a[1] * b[0];
+  const norm = (a) => Math.hypot(a[0], a[1]);
+  const unit = (a) => { const n = norm(a); return n > 1e-12 ? [a[0] / n, a[1] / n] : [a[0], a[1]]; };
+  const angleBetween = (a, b) => Math.atan2(Math.abs(cross(a, b)), dot(a, b)) * DEG;
+  const sang = (a, b) => Math.atan2(cross(a, b), dot(a, b)) * DEG;
+  const mod = (a, m) => ((a % m) + m) % m;
+  const clip = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
+  function fmt(x) {
+    let s = x.toFixed(2);
+    s = s.replace(/0+$/, '').replace(/\.$/, '');
+    return s === '-0' ? '0' : s;
+  }
+  const P2 = (p) => fmt(p[0]) + ' ' + fmt(p[1]);
+
+  function fitline(pts) {
+    let cx = 0, cy = 0;
+    for (const p of pts) { cx += p[0]; cy += p[1]; }
+    cx /= pts.length; cy /= pts.length;
+    let a = 0, b = 0, c = 0;
+    for (const p of pts) { const dx = p[0] - cx, dy = p[1] - cy; a += dx * dx; b += dx * dy; c += dy * dy; }
+    const th = 0.5 * Math.atan2(2 * b, a - c);
+    return [[cx, cy], [Math.cos(th), Math.sin(th)]];
+  }
+  function intersect(c1, d1, c2, d2) {
+    const den = cross(d1, d2);
+    if (Math.abs(den) < 1e-6) return null;
+    return add(c1, mul(d1, cross(sub(c2, c1), d2) / den));
+  }
+  function lineDev(pts, a, b) {
+    if (!pts.length) return 0;
+    const v = sub(b, a), n = norm(v);
+    let m = 0;
+    if (n < 1e-9) { for (const p of pts) m = Math.max(m, norm(sub(p, a))); return m; }
+    for (const p of pts) m = Math.max(m, Math.abs(cross(v, sub(p, a))) / n);
+    return m;
+  }
+  function unwrap(a) {
+    const out = new Float64Array(a.length);
+    if (!a.length) return out;
+    out[0] = a[0];
+    let corr = 0;
+    for (let i = 1; i < a.length; i++) {
+      const d = a[i] - a[i - 1];
+      let dm = mod(d + Math.PI, 2 * Math.PI) - Math.PI;
+      if (dm === -Math.PI && d > 0) dm = Math.PI;
+      let ph = dm - d;
+      if (Math.abs(d) < Math.PI) ph = 0;
+      corr += ph;
+      out[i] = a[i] + corr;
+    }
+    return out;
+  }
+  function ptp(arr, s, e) { let lo = Infinity, hi = -Infinity; for (let i = s; i < e; i++) { if (arr[i] < lo) lo = arr[i]; if (arr[i] > hi) hi = arr[i]; } return hi - lo; }
+
+  // ---------------------------------------------------------------- Bezier fitting (Schneider)
+  function bez(p, u) {
+    const m = 1 - u, a = m * m * m, b = 3 * m * m * u, c = 3 * m * u * u, d = u * u * u;
+    return [a * p[0][0] + b * p[1][0] + c * p[2][0] + d * p[3][0], a * p[0][1] + b * p[1][1] + c * p[2][1] + d * p[3][1]];
+  }
+  function chord(pts) {
+    const d = new Float64Array(pts.length);
+    for (let i = 1; i < pts.length; i++) d[i] = d[i - 1] + norm(sub(pts[i], pts[i - 1]));
+    const L = d[d.length - 1];
+    if (L > 0) for (let i = 0; i < d.length; i++) d[i] /= L;
+    return d;
+  }
+  function gen(pts, u, t1, t2) {
+    const p0 = pts[0], p3 = pts[pts.length - 1];
+    let c00 = 0, c01 = 0, c11 = 0, x0 = 0, x1 = 0;
+    for (let i = 0; i < pts.length; i++) {
+      const ui = u[i], m = 1 - ui;
+      const a1 = [t1[0] * 3 * m * m * ui, t1[1] * 3 * m * m * ui];
+      const a2 = [t2[0] * 3 * m * ui * ui, t2[1] * 3 * m * ui * ui];
+      c00 += dot(a1, a1); c01 += dot(a1, a2); c11 += dot(a2, a2);
+      const b0 = m * m * m + 3 * m * m * ui, b1 = 3 * m * ui * ui + ui * ui * ui;
+      const tmp = [pts[i][0] - (b0 * p0[0] + b1 * p3[0]), pts[i][1] - (b0 * p0[1] + b1 * p3[1])];
+      x0 += dot(a1, tmp); x1 += dot(a2, tmp);
+    }
+    const det = c00 * c11 - c01 * c01, seg = norm(sub(p3, p0));
+    let al1, al2;
+    if (Math.abs(det) > 1e-12) { al1 = (x0 * c11 - x1 * c01) / det; al2 = (c00 * x1 - c01 * x0) / det; }
+    else { al1 = al2 = seg / 3; }
+    if (!(1e-6 * seg < al1 && al1 < 2 * seg) || !(1e-6 * seg < al2 && al2 < 2 * seg)) al1 = al2 = seg / 3;
+    return [p0, add(p0, mul(t1, al1)), add(p3, mul(t2, al2)), p3];
+  }
+  function reparam(b, pts, u) {
+    const d1 = [mul(sub(b[1], b[0]), 3), mul(sub(b[2], b[1]), 3), mul(sub(b[3], b[2]), 3)];
+    const d2 = [mul(sub(d1[1], d1[0]), 2), mul(sub(d1[2], d1[1]), 2)];
+    const out = new Float64Array(u.length);
+    for (let i = 0; i < u.length; i++) {
+      const ui = u[i], m = 1 - ui;
+      const q = sub(bez(b, ui), pts[i]);
+      const q1 = [m * m * d1[0][0] + 2 * m * ui * d1[1][0] + ui * ui * d1[2][0], m * m * d1[0][1] + 2 * m * ui * d1[1][1] + ui * ui * d1[2][1]];
+      const q2 = [m * d2[0][0] + ui * d2[1][0], m * d2[0][1] + ui * d2[1][1]];
+      const num = dot(q, q1), den = dot(q1, q1) + dot(q, q2);
+      let v = Math.abs(den) > 1e-12 ? ui - num / den : ui;
+      if (!Number.isFinite(v)) v = ui;
+      out[i] = clip(v, 0, 1);
+    }
+    return out;
+  }
+  function fit(pts, t1, t2, err, depth = 0) {
+    const n = pts.length;
+    if (n <= 3) {
+      const s = norm(sub(pts[n - 1], pts[0])) / 3;
+      return [[pts[0], add(pts[0], mul(t1, s)), add(pts[n - 1], mul(t2, s)), pts[n - 1]]];
+    }
+    let u = chord(pts), b, dd;
+    for (let it = 0; it < 10; it++) {
+      b = gen(pts, u, t1, t2);
+      dd = new Float64Array(n); let mx = 0;
+      for (let i = 0; i < n; i++) { const e = sub(bez(b, u[i]), pts[i]); dd[i] = dot(e, e); if (dd[i] > mx) mx = dd[i]; }
+      if (mx < err * err || depth > 10) return [b];
+      u = reparam(b, pts, u);
+    }
+    let im = 0; for (let i = 1; i < n; i++) if (dd[i] > dd[im]) im = i;
+    const i = clip(im, 2, n - 3);
+    const tc = unit(sub(pts[i - 2], pts[i + 2]));
+    return fit(pts.slice(0, i + 1), t1, tc, err, depth + 1).concat(fit(pts.slice(i), mul(tc, -1), t2, err, depth + 1));
+  }
+
+  function smoothOpen(pts, k) {
+    const n = pts.length;
+    if (n < 5 || k < 1) return pts;
+    const out = pts.slice();
+    for (let i = 1; i < n - 1; i++) {
+      const r = Math.min(k, i, n - 1 - i);
+      let sx = 0, sy = 0;
+      for (let j = i - r; j <= i + r; j++) { sx += pts[j][0]; sy += pts[j][1]; }
+      out[i] = [sx / (2 * r + 1), sy / (2 * r + 1)];
+    }
+    return out;
+  }
+  function smoothClosed(p, k) {
+    const n = p.length, out = new Array(n), w = 2 * k + 1;
+    let sx = 0, sy = 0;
+    for (let j = -k; j <= k; j++) { const q = p[mod(j, n)]; sx += q[0]; sy += q[1]; }
+    for (let i = 0; i < n; i++) {
+      out[i] = [sx / w, sy / w];
+      const a = p[mod(i - k, n)], b = p[mod(i + k + 1, n)];
+      sx += b[0] - a[0]; sy += b[1] - a[1];
+    }
+    return out;
+  }
+
+  // ---------------------------------------------------------------- circles / arcs
+  function fitCircle(pts) {
+    const n = pts.length;
+    let mx = 0, my = 0;
+    for (const p of pts) { mx += p[0]; my += p[1]; }
+    mx /= n; my /= n;
+    // least squares for 2x*cx + 2y*cy + c = x^2 + y^2 (centred coordinates)
+    const M = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], v = [0, 0, 0];
+    for (const p of pts) {
+      const x = p[0] - mx, y = p[1] - my, row = [2 * x, 2 * y, 1], bb = x * x + y * y;
+      for (let r = 0; r < 3; r++) { v[r] += row[r] * bb; for (let c = 0; c < 3; c++) M[r][c] += row[r] * row[c]; }
+    }
+    const s = solve3(M, v);
+    if (!s) return null;
+    const r = Math.sqrt(Math.max(s[2] + s[0] * s[0] + s[1] * s[1], 0));
+    const c = [s[0] + mx, s[1] + my];
+    const res = new Float64Array(n);
+    for (let i = 0; i < n; i++) res[i] = Math.abs(Math.hypot(pts[i][0] - c[0], pts[i][1] - c[1]) - r);
+    return { c, r, res };
+  }
+  function solve3(M, v) {
+    const A = M.map((row, i) => row.concat([v[i]]));
+    for (let col = 0; col < 3; col++) {
+      let piv = col;
+      for (let r = col + 1; r < 3; r++) if (Math.abs(A[r][col]) > Math.abs(A[piv][col])) piv = r;
+      if (Math.abs(A[piv][col]) < 1e-12) return null;
+      [A[col], A[piv]] = [A[piv], A[col]];
+      for (let r = 0; r < 3; r++) {
+        if (r === col) continue;
+        const f = A[r][col] / A[col][col];
+        for (let c = col; c < 4; c++) A[r][c] -= f * A[col][c];
+      }
+    }
+    return [A[0][3] / A[0][0], A[1][3] / A[1][1], A[2][3] / A[2][2]];
+  }
+  const maxOf = (a) => { let m = -Infinity; for (const x of a) if (x > m) m = x; return m; };
+  const rmsOf = (a) => { let s = 0; for (const x of a) s += x * x; return Math.sqrt(s / a.length); };
+  function angles(pts, c) { const a = new Float64Array(pts.length); for (let i = 0; i < pts.length; i++) a[i] = Math.atan2(pts[i][1] - c[1], pts[i][0] - c[0]); return unwrap(a); }
+  function monotone(ang, tol) {
+    let up = true, down = true;
+    for (let i = 1; i < ang.length; i++) { const d = ang[i] - ang[i - 1]; if (d < -tol) up = false; if (d > tol) down = false; }
+    return up || down;
+  }
+
+  function arcBeziers(c, r, a0, a1) {
+    const sweep = a1 - a0, nseg = Math.max(1, Math.ceil(Math.abs(sweep) / (Math.PI / 2) - 1e-6)), out = [];
+    for (let i = 0; i < nseg; i++) {
+      const t0 = a0 + sweep * i / nseg, t1 = a0 + sweep * (i + 1) / nseg, k = 4 / 3 * Math.tan((t1 - t0) / 4);
+      const p0 = [c[0] + r * Math.cos(t0), c[1] + r * Math.sin(t0)], p3 = [c[0] + r * Math.cos(t1), c[1] + r * Math.sin(t1)];
+      const p1 = [p0[0] - k * r * Math.sin(t0), p0[1] + k * r * Math.cos(t0)];
+      const p2 = [p3[0] + k * r * Math.sin(t1), p3[1] - k * r * Math.cos(t1)];
+      out.push([p0, p1, p2, p3]);
+    }
+    return out;
+  }
+  const bzStr = (bz) => 'C' + P2(bz[1]) + ' ' + P2(bz[2]) + ' ' + P2(bz[3]);
+
+  function tryArc(pts, closed = false) {
+    const n = pts.length;
+    if (n < 12) return null;
+    const core = closed ? pts : pts.slice(Math.floor(n / 6), n - Math.floor(n / 6));
+    const f = fitCircle(core);
+    if (!f) return null;
+    const { c, r, res } = f;
+    if (r < 1.2 || r > ARC_RMAX) return null;
+    if (maxOf(res) > Math.max(0.25, 0.035 * r) || rmsOf(res) > Math.max(0.1, 0.013 * r)) return null;
+    if (!closed) {
+      let m = 0; for (const p of pts) m = Math.max(m, Math.abs(Math.hypot(p[0] - c[0], p[1] - c[1]) - r));
+      if (m > Math.max(0.9, 0.12 * r)) return null;
+    }
+    const ang = angles(pts, c);
+    if (!closed && !monotone(ang, 0.02)) return null;
+    const sweep = ang[n - 1] - ang[0];
+    if (!closed && Math.abs(sweep) < 100 / DEG) return null;
+    return { c, r, a0: ang[0], a1: ang[n - 1] };
+  }
+
+  const RUN_FRACS = (() => {
+    const f = [];
+    for (let k = 0; 0.95 - 0.05 * k > 0.3 + 1e-9; k++) f.push(0.95 - 0.05 * k);
+    for (let k = 0; 0.3 - 0.02 * k > 0.04 + 1e-9; k++) f.push(0.3 - 0.02 * k);
+    return f;
+  })();
+
+  function findArcRun(pts, minSweep = 170 / DEG) {
+    const N = pts.length;
+    if (N < 40) return null;
+    const stepd = Math.max(1, Math.floor(N / 160));
+    const q = []; for (let i = 0; i < N; i += stepd) q.push(pts[i]);
+    const M = q.length;
+    const thr = new Float64Array(M - 1);
+    for (let i = 0; i < M - 1; i++) thr[i] = Math.atan2(q[i + 1][1] - q[i][1], q[i + 1][0] - q[i][0]);
+    const th = unwrap(thr);
+    if (ptp(th, 0, th.length) < minSweep * 0.9) return null;
+    const lengths = [...new Set(RUN_FRACS.map((f) => Math.floor(M * f)))].sort((a, b) => b - a);
+    let best = null;
+    for (const L of lengths) {
+      if (L < 14) break;
+      const step = Math.max(1, Math.floor(L / 8));
+      for (let st = 0; st <= M - L; st += step) {
+        if (ptp(th, st, Math.min(th.length, st + L - 1)) < minSweep * 0.85) continue;
+        const seg = q.slice(st, st + L);
+        const f = fitCircle(seg);
+        if (!f) continue;
+        const { c, r, res } = f;
+        if (r < 1.5 || r > ARC_RMAX) continue;
+        if (maxOf(res) > Math.max(0.25, 0.035 * r) || rmsOf(res) > Math.max(0.09, 0.012 * r)) continue;
+        const ang = angles(seg, c);
+        if (Math.abs(ang[ang.length - 1] - ang[0]) < minSweep) continue;
+        if (!monotone(ang, 0.03)) continue;
+        best = { i0: st * stepd, i1: Math.min(N - 1, (st + L - 1) * stepd), c, r };
+        break;
+      }
+      if (best) break;
+    }
+    if (!best) return null;
+    const { c, r } = best, tol = Math.max(0.25, 0.035 * r);
+    const off = (p) => Math.abs(Math.hypot(p[0] - c[0], p[1] - c[1]) - r);
+    while (best.i0 > 0 && off(pts[best.i0 - 1]) < tol) best.i0--;
+    while (best.i1 < N - 1 && off(pts[best.i1 + 1]) < tol) best.i1++;
+    return best;
+  }
+
+  function bzPath(ptsq, tA, tB) {
+    let plen = 0;
+    for (let i = 1; i < ptsq.length; i++) plen += norm(sub(ptsq[i], ptsq[i - 1]));
+    if (ptsq.length < 3 || plen < 0.25) return 'L' + P2(ptsq[ptsq.length - 1]);
+    return fit(ptsq, tA, tB, FIT_TOL).map(bzStr).join('');
+  }
+  function endDir(seq) {
+    const q = seq.slice(0, Math.max(3, Math.min(seq.length, Math.floor(1.0 * S))));
+    if (q.length >= 3) {
+      let d = unit(fitline(q)[1]);
+      if (dot(d, sub(q[q.length - 1], q[0])) < 0) d = mul(d, -1);
+      return d;
+    }
+    return unit(sub(seq[seq.length - 1], seq[0]));
+  }
+
+  function emitCurve(rawp, sp, pa, pb, t1, t2, defaultPts, depth = 0) {
+    const run = (depth < 4 && USE_ARCS) ? findArcRun(rawp) : null;
+    if (!run) return bzPath(defaultPts, t1, t2);
+    const { i0, i1, c, r } = run;
+    let ea = add(c, mul(unit(sub(rawp[i0], c)), r)), eb = add(c, mul(unit(sub(rawp[i1], c)), r));
+    if (i0 <= 2 && Math.abs(norm(sub(pa, c)) - r) < 0.4) ea = pa;
+    if (i1 >= rawp.length - 3 && Math.abs(norm(sub(pb, c)) - r) < 0.4) eb = pb;
+    const seg = rawp.slice(i0, i1 + 1);
+    const ang = angles(seg, c);
+    const a0 = Math.atan2(ea[1] - c[1], ea[0] - c[0]), a1 = Math.atan2(eb[1] - c[1], eb[0] - c[0]);
+    let sw = a1 - a0;
+    const want = ang[ang.length - 1] - ang[0];
+    while (sw - want > Math.PI) sw -= 2 * Math.PI;
+    while (want - sw > Math.PI) sw += 2 * Math.PI;
+    // verify: the exact arc must follow the original points
+    const arcpts = [];
+    for (let k = 0; k < 64; k++) { const t = a0 + sw * k / 63; arcpts.push([c[0] + r * Math.cos(t), c[1] + r * Math.sin(t)]); }
+    const seg4 = seg.filter((_, k) => k % 4 === 0);
+    let dA = 0, dB = 0;
+    for (const a of arcpts) { let m = Infinity; for (const s of seg4) m = Math.min(m, norm(sub(a, s))); dA = Math.max(dA, m); }
+    for (const s of seg4) { let m = Infinity; for (const a of arcpts) m = Math.min(m, norm(sub(a, s))); dB = Math.max(dB, m); }
+    if (Math.max(dA, dB) > 0.8 || Math.abs(sw - want) > 0.6) return bzPath(defaultPts, t1, t2);
+    ARCS++;
+    const sgn = sw > 0 ? 1 : -1;
+    const tan0 = [-sgn * Math.sin(a0), sgn * Math.cos(a0)];
+    const tan1 = [-sgn * Math.sin(a0 + sw), sgn * Math.cos(a0 + sw)];
+    let o = '';
+    if (norm(sub(ea, pa)) > 0.05) {
+      const partA = i0 > 1 ? [pa].concat(sp.slice(1, i0), [ea]) : [pa, ea];
+      let tAend = endDir(partA.slice().reverse());
+      if (angleBetween(mul(tAend, -1), tan0) < 25) tAend = mul(tan0, -1);
+      o += emitCurve(rawp.slice(0, i0 + 1), sp.slice(0, i0 + 1), pa, ea, t1, tAend, partA, depth + 1);
+    }
+    o += arcBeziers(c, r, a0, a0 + sw).map(bzStr).join('');
+    if (norm(sub(pb, eb)) > 0.05) {
+      const partB = i1 < sp.length - 2 ? [eb].concat(sp.slice(i1 + 1, sp.length - 1), [pb]) : [eb, pb];
+      let tBst = endDir(partB);
+      if (angleBetween(tBst, tan1) < 25) tBst = tan1;
+      o += emitCurve(rawp.slice(i1), sp.slice(i1), eb, pb, tBst, t2, partB, depth + 1);
+    }
+    return o;
+  }
+
+  // ---------------------------------------------------------------- polygon (Douglas-Peucker, closed)
+  function approxPolyClosed(P, eps) {
+    const n = P.length;
+    const d2 = (a, b) => (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2;
+    let f1 = 0, best = -1;
+    for (let i = 0; i < n; i++) { const d = d2(P[i], P[0]); if (d > best) { best = d; f1 = i; } }
+    let f0 = 0; best = -1;
+    for (let i = 0; i < n; i++) { const d = d2(P[i], P[f1]); if (d > best) { best = d; f0 = i; } }
+    const keep = new Set([f0, f1]);
+    const stack = [[f0, f1], [f1, f0]];
+    while (stack.length) {
+      const [a, b] = stack.pop();
+      const len = mod(b - a, n);
+      if (len < 2) continue;
+      const A = P[a], B = P[b], v = sub(B, A), vn = norm(v);
+      let far = -1, dmax = -1;
+      for (let k = 1; k < len; k++) {
+        const i = (a + k) % n;
+        const d = vn < 1e-12 ? norm(sub(P[i], A)) : Math.abs(cross(v, sub(P[i], A))) / vn;
+        if (d > dmax) { dmax = d; far = i; }
+      }
+      if (dmax > eps) { keep.add(far); stack.push([a, far], [far, b]); }
+    }
+    return [...keep].sort((x, y) => x - y);
+  }
+
+  // ---------------------------------------------------------------- tracing one border
+  function trace(raw) {
+    const n = raw.length;
+    const P = smoothClosed(raw, 2);
+    const idx = approxPolyClosed(P, DP_EPS);
+    if (idx.length < 3) return smoothLoop(P);
+    let VV = idx.map((i) => ({ p: P[i].slice(), iin: i, iout: i }));
+    let changed = true;
+    while (changed && VV.length > 4) {
+      changed = false;
+      const m = VV.length;
+      let best = null;
+      for (let k = 0; k < m; k++) {
+        for (const j of [1, 2, 3]) {
+          if (j + 3 > m) break;
+          const ids = []; for (let q = 0; q <= j; q++) ids.push((k + q) % m);
+          const A = VV[mod(k - 1, m)].p, D = VV[(k + j + 1) % m].p;
+          const pts_ = ids.map((i) => VV[i].p);
+          let inner = 0; for (let q = 0; q < j; q++) inner += norm(sub(pts_[q + 1], pts_[q]));
+          if (inner > MERGE_LEN + 0.55 * (j - 1)) continue;
+          const B = pts_[0], E = pts_[pts_.length - 1];
+          const la = norm(sub(B, A)), ld = norm(sub(D, E));
+          if (j > 1 && (Math.min(la, ld) < 1.0 || Math.min(la, ld) < 1.5 * inner)) continue;
+          const seq = [A].concat(pts_, [D]);
+          let pos = true, neg = true;
+          for (let q = 0; q < seq.length - 2; q++) {
+            const t = sang(sub(seq[q + 1], seq[q]), sub(seq[q + 2], seq[q + 1]));
+            if (!(t > 0)) pos = false; if (!(t < 0)) neg = false;
+          }
+          if (!pos && !neg) continue;
+          const tot = Math.abs(sang(sub(B, A), sub(D, E)));
+          if (tot < 55 || tot > 178) continue;
+          const x = intersect(A, unit(sub(B, A)), D, unit(sub(D, E)));
+          if (!x) continue;
+          const lim = tot <= 150 ? 0.75 : 1.4;
+          let md = Infinity; for (const p of pts_) md = Math.min(md, norm(sub(p, x)));
+          if (md > lim) continue;
+          const score = inner / j;
+          if (!best || score < best.score) best = { score, ids, x };
+        }
+      }
+      if (best) {
+        const merged = { p: best.x, iin: VV[best.ids[0]].iin, iout: VV[best.ids[best.ids.length - 1]].iout };
+        const drop = new Set(best.ids), NV = [];
+        for (let i = 0; i < VV.length; i++) {
+          if (i === best.ids[0]) NV.push(merged);
+          else if (!drop.has(i)) NV.push(VV[i]);
+        }
+        VV = NV; changed = true;
+      }
+    }
+    const m = VV.length;
+    const V = VV.map((v) => v.p);
+    const Lprev = V.map((v, k) => norm(sub(v, V[mod(k - 1, m)])));
+    const Lnext = V.map((_, k) => Lprev[(k + 1) % m]);
+    const ang = V.map((v, k) => angleBetween(sub(v, V[mod(k - 1, m)]), sub(V[(k + 1) % m], v)));
+    const corner = new Array(m).fill(false);
+    for (let k = 0; k < m; k++) {
+      const a = ang[k];
+      if (a >= 60) corner[k] = true;
+      else if (a >= 40 && Math.min(Lprev[k], Lnext[k]) >= 1.3) corner[k] = true;
+      else if (a >= 33 && a >= 2.0 * Math.max(ang[mod(k - 1, m)], ang[(k + 1) % m]) && Math.min(Lprev[k], Lnext[k]) >= 1.0) corner[k] = true;
+    }
+    const ci = []; corner.forEach((c, k) => { if (c) ci.push(k); });
+    if (!ci.length) return smoothLoop(P);
+    const Cpos = new Map(ci.map((k) => [k, V[k].slice()]));
+    const cornerSet = new Set(ci);
+    const idxIn = VV.map((v) => v.iin), idxOut = VV.map((v) => v.iout);
+    const range = (a, b, wrapIfLE) => {                       // arange(a, b + (n if cond else 0) + 1) % n
+      const end = b + ((wrapIfLE ? b <= a : b < a) ? n : 0);
+      const r = []; for (let i = a; i <= end; i++) r.push(i % n); return r;
+    };
+    const segs = ci.map((ka, j) => { const kb = ci[(j + 1) % ci.length]; return { ka, kb, rng: range(idxOut[ka], idxIn[kb], true) }; });
+    const kinds = segs.map(({ ka, kb, rng }) => {
+      const pts = rng.map((i) => P[i]);
+      const inner = rng.length > 6 ? pts.slice(2, pts.length - 2) : pts;
+      return lineDev(inner, Cpos.get(ka), Cpos.get(kb)) < LINE_TOL ? 'L' : 'C';
+    });
+    segs.forEach(({ ka, kb }, s) => {
+      if (kinds[s] !== 'L') return;
+      const a = Cpos.get(ka), b = Cpos.get(kb), d = sub(b, a);
+      if (norm(d) < 0.6) return;
+      const g = Math.atan2(Math.abs(d[1]), Math.abs(d[0])) * DEG;
+      if (g < AXIS_SNAP) { const y = (a[1] + b[1]) / 2; a[1] = b[1] = y; }
+      else if (g > 90 - AXIS_SNAP) { const x = (a[0] + b[0]) / 2; a[0] = b[0] = x; }
+    });
+    const pos = (k) => (Cpos.has(k) ? Cpos.get(k) : V[k]);
+    let out = 'M' + P2(Cpos.get(segs[0].ka));
+    segs.forEach(({ ka, kb }, s) => {
+      if (kinds[s] === 'L') { out += 'L' + P2(Cpos.get(kb)); return; }
+      // long straight edges inside this curved run (stems, flats)
+      const chain = [ka]; for (let q = 0; q < mod(kb - ka - 1, m); q++) chain.push((ka + 1 + q) % m); chain.push(kb);
+      const lines = [];
+      for (let c = 0; c < chain.length - 1; c++) {
+        const u = chain[c], w = chain[c + 1];
+        const pu = pos(u), pw = pos(w), L = norm(sub(pw, pu));
+        if (L < 2.5) continue;
+        const rr = range(idxOut[u], idxIn[w], false);
+        const cut = Math.floor(rr.length / 8);
+        const inner = rr.slice(cut, rr.length - cut).map((i) => P[i]);
+        if (inner.length < 3) continue;
+        const dv_ = sub(pw, pu), g = Math.atan2(Math.abs(dv_[1]), Math.abs(dv_[0])) * DEG;
+        const axis = g < 4 || g > 86;
+        const dv = lineDev(inner, pu, pw);
+        const nb = Math.max(norm(sub(V[u], V[mod(u - 1, m)])), norm(sub(V[(w + 1) % m], V[w])));
+        const su = cross(sub(V[u], V[mod(u - 1, m)]), sub(V[(u + 1) % m], V[u]));
+        const sw = cross(sub(V[w], V[mod(w - 1, m)]), sub(V[(w + 1) % m], V[w]));
+        const extremum = !cornerSet.has(u) && !cornerSet.has(w) && su * sw > 0;
+        if (extremum && dv > 0.03) continue;
+        if (dv < Math.min(0.3, Math.max(0.1, 0.015 * L)) && (dv < 0.045 || L >= 1.8 * nb) && (axis || L >= 6)) lines.push([u, w]);
+      }
+      const pieces = []; let cur = ka;
+      for (const [u, w] of lines) { if (u !== cur) pieces.push(['c', cur, u]); pieces.push(['l', u, w]); cur = w; }
+      if (cur !== kb || !pieces.length) pieces.push(['c', cur, kb]);
+      for (const [kind, u, w] of pieces) {
+        if (kind !== 'l') continue;
+        const d = sub(pos(w), pos(u)), g = Math.atan2(Math.abs(d[1]), Math.abs(d[0])) * DEG;
+        if (!Cpos.has(u)) Cpos.set(u, V[u].slice());
+        if (!Cpos.has(w)) Cpos.set(w, V[w].slice());
+        const cu = Cpos.get(u), cw = Cpos.get(w);
+        if (g < AXIS_SNAP) { const y = (cu[1] + cw[1]) / 2; cu[1] = cw[1] = y; }
+        else if (g > 90 - AXIS_SNAP) { const x = (cu[0] + cw[0]) / 2; cu[0] = cw[0] = x; }
+      }
+      pieces.forEach(([kind, u, w], pi) => {
+        const pa = pos(u), pb = pos(w);
+        if (kind === 'l') { out += 'L' + P2(pb); return; }
+        const rr = range(idxOut[u], idxIn[w], true);
+        const rawSeg = rr.map((i) => raw[i]);
+        let seglen = 0; for (let i = 1; i < rawSeg.length; i++) seglen += norm(sub(rawSeg[i], rawSeg[i - 1]));
+        const kk = Math.trunc(clip(seglen / 10, 0.25, SMOOTH_MAX) * S);
+        const sm = smoothOpen(rawSeg, kk);
+        const trim = (cornerSet.has(u) || cornerSet.has(w)) ? Math.min(Math.trunc(0.35 * S), Math.floor(sm.length / 4)) : 0;
+        const body = sm.length > 2 * trim + 4 ? sm.slice(trim, sm.length - trim) : sm.slice(1, sm.length - 1);
+        const pts = [pa].concat(body, [pb]);
+        let t1 = endDir(pts), t2 = endDir(pts.slice().reverse());
+        if (pi > 0 && pieces[pi - 1][0] === 'l') t1 = unit(sub(pos(pieces[pi - 1][2]), pos(pieces[pi - 1][1])));
+        if (pi + 1 < pieces.length && pieces[pi + 1][0] === 'l') t2 = mul(unit(sub(pos(pieces[pi + 1][2]), pos(pieces[pi + 1][1]))), -1);
+        const arc = USE_ARCS ? tryArc(rawSeg) : null;
+        if (arc) {
+          ARCS++;
+          const { c, r } = arc;
+          const ea = add(c, mul(unit(sub(pa, c)), r)), eb = add(c, mul(unit(sub(pb, c)), r));
+          const a0 = Math.atan2(ea[1] - c[1], ea[0] - c[0]), a1 = Math.atan2(eb[1] - c[1], eb[0] - c[0]);
+          let sw = a1 - a0; const want = arc.a1 - arc.a0;
+          while (sw - want > Math.PI) sw -= 2 * Math.PI;
+          while (want - sw > Math.PI) sw += 2 * Math.PI;
+          if (Cpos.has(u)) { const cu = Cpos.get(u); cu[0] = ea[0]; cu[1] = ea[1]; }
+          if (norm(sub(ea, pa)) > 1e-6) out += 'L' + P2(ea);
+          out += arcBeziers(c, r, a0, a0 + sw).map(bzStr).join('');
+          if (Cpos.has(w)) { const cw = Cpos.get(w); cw[0] = eb[0]; cw[1] = eb[1]; }
+          return;
+        }
+        out += emitCurve(rawSeg, smoothOpen(rawSeg, kk), pa, pb, t1, t2, pts);
+      });
+    });
+    return out + 'Z';
+  }
+
+  function smoothLoop(P) {
+    const n = P.length;
+    const arc = USE_ARCS ? tryArc(P.concat([P[0]]), true) : null;
+    if (arc) {
+      const sw = (arc.a1 - arc.a0) > 0 ? 2 * Math.PI : -2 * Math.PI;
+      const bzs = arcBeziers(arc.c, arc.r, 0, sw);
+      return 'M' + P2(bzs[0][0]) + bzs.map(bzStr).join('') + 'Z';
+    }
+    let L = 0; for (let i = 0; i < n; i++) L += norm(sub(P[(i + 1) % n], P[i]));
+    const k = Math.trunc(clip(L / 24, 0.2, 1.5) * S);
+    const ps = smoothClosed(P, Math.max(1, k));
+    const h = Math.floor(n / 2);
+    const tang = (i) => unit(sub(ps[(i + 1) % n], ps[mod(i - 1, n)]));
+    let s = 'M' + P2(ps[0]);
+    for (const [a, b] of [[0, h], [h, n]]) {
+      const seg = []; for (let i = a; i <= b; i++) seg.push(ps[i % n]);
+      s += fit(seg, tang(a), mul(tang(b % n), -1), FIT_TOL).map(bzStr).join('');
+    }
+    return s + 'Z';
+  }
+
+  function pathArea(d) {
+    const pts = []; let cur = null;
+    const re = /([MLCZ])([^MLCZ]*)/g; let m;
+    while ((m = re.exec(d))) {
+      const nums = (m[2].match(/-?\d+(?:\.\d+)?(?:e-?\d+)?/g) || []).map(Number);
+      if (m[1] === 'M' || m[1] === 'L') { cur = [nums[0], nums[1]]; pts.push(cur); }
+      else if (m[1] === 'C') {
+        const p = [cur, [nums[0], nums[1]], [nums[2], nums[3]], [nums[4], nums[5]]];
+        for (let k = 1; k < 10; k++) pts.push(bez(p, k / 9));
+        cur = p[3];
+      }
+    }
+    if (pts.length < 3) return 0;
+    let a = 0;
+    for (let i = 0; i < pts.length; i++) { const p = pts[i], q = pts[(i + 1) % pts.length]; a += p[0] * q[1] - q[0] * p[1]; }
+    return Math.abs(a / 2);
+  }
+
+  // ---------------------------------------------------------------- image processing
+  function gaussKernel(sigma) {
+    const k = (Math.round(sigma * 4 * 2 + 1)) | 1, h = (k - 1) / 2, w = new Float64Array(k);
+    let s = 0; for (let i = 0; i < k; i++) { w[i] = Math.exp(-((i - h) ** 2) / (2 * sigma * sigma)); s += w[i]; }
+    for (let i = 0; i < k; i++) w[i] /= s;
+    return w;
+  }
+  const reflect101 = (i, n) => { if (n === 1) return 0; while (i < 0 || i >= n) { if (i < 0) i = -i; if (i >= n) i = 2 * n - 2 - i; } return i; };
+  function blurFloat(src, W, H, sigma) {
+    const w = gaussKernel(sigma), h = (w.length - 1) / 2, tmp = new Float32Array(W * H), out = new Float32Array(W * H);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      let s = 0; for (let k = 0; k < w.length; k++) s += w[k] * src[y * W + reflect101(x + k - h, W)];
+      tmp[y * W + x] = s;
+    }
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      let s = 0; for (let k = 0; k < w.length; k++) s += w[k] * tmp[reflect101(y + k - h, H) * W + x];
+      out[y * W + x] = s;
+    }
+    return out;
+  }
+  function sobel(src, W, H) {
+    const gx = new Float32Array(W * H), gy = new Float32Array(W * H);
+    const at = (x, y) => src[reflect101(y, H) * W + reflect101(x, W)];
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      gx[y * W + x] = (at(x + 1, y - 1) + 2 * at(x + 1, y) + at(x + 1, y + 1)) - (at(x - 1, y - 1) + 2 * at(x - 1, y) + at(x - 1, y + 1));
+      gy[y * W + x] = (at(x - 1, y + 1) + 2 * at(x, y + 1) + at(x + 1, y + 1)) - (at(x - 1, y - 1) + 2 * at(x, y - 1) + at(x + 1, y - 1));
+    }
+    return [gx, gy];
+  }
+  function cubicW(x) {
+    const A = -0.75;
+    const c0 = ((A * (x + 1) - 5 * A) * (x + 1) + 8 * A) * (x + 1) - 4 * A;
+    const c1 = ((A + 2) * x - (A + 3)) * x * x + 1;
+    const c2 = ((A + 2) * (1 - x) - (A + 3)) * (1 - x) * (1 - x) + 1;
+    return [c0, c1, c2, 1 - c0 - c1 - c2];
+  }
+
+  // Supersampled binary mask: bicubic upscale + coverage-accurate subpixels on clean edge pixels
+  function coverageMask(t, W, H) {
+    const BW = W * S, BH = H * S, mask = new Uint8Array(BW * BH);
+    // x taps for the bicubic upscale
+    const xi = new Int32Array(BW * 4), xw = new Float32Array(BW * 4);
+    for (let dx = 0; dx < BW; dx++) {
+      let fx = (dx + 0.5) / S - 0.5; const sx = Math.floor(fx); fx -= sx;
+      const w = cubicW(fx);
+      for (let k = 0; k < 4; k++) { xi[dx * 4 + k] = clip(sx - 1 + k, 0, W - 1); xw[dx * 4 + k] = w[k]; }
+    }
+    const rowCache = new Map();
+    const hrow = (sy) => {
+      if (rowCache.has(sy)) return rowCache.get(sy);
+      const r = new Float32Array(BW), base = sy * W;
+      for (let dx = 0; dx < BW; dx++) {
+        const o = dx * 4;
+        r[dx] = xw[o] * t[base + xi[o]] + xw[o + 1] * t[base + xi[o + 1]] + xw[o + 2] * t[base + xi[o + 2]] + xw[o + 3] * t[base + xi[o + 3]];
+      }
+      rowCache.set(sy, r);
+      if (rowCache.size > 8) rowCache.delete(rowCache.keys().next().value);
+      return r;
+    };
+    for (let dy = 0; dy < BH; dy++) {
+      let fy = (dy + 0.5) / S - 0.5; const sy = Math.floor(fy); fy -= sy;
+      const w = cubicW(fy);
+      const r0 = hrow(clip(sy - 1, 0, H - 1)), r1 = hrow(clip(sy, 0, H - 1)), r2 = hrow(clip(sy + 1, 0, H - 1)), r3 = hrow(clip(sy + 2, 0, H - 1));
+      const o = dy * BW;
+      for (let dx = 0; dx < BW; dx++) mask[o + dx] = (w[0] * r0[dx] + w[1] * r1[dx] + w[2] * r2[dx] + w[3] * r3[dx]) > 0.5 ? 1 : 0;
+    }
+    // coverage-accurate subpixels
+    const ts = blurFloat(t, W, H, 0.8);
+    const [gx, gy] = sobel(ts, W, H);
+    const T = (x, y) => t[clip(y, 0, H - 1) * W + clip(x, 0, W - 1)];
+    const off = []; for (let j = 0; j < S; j++) off.push((j + 0.5) / S - 0.5);
+    let seed = 12345;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) >>> 0; return seed / 4294967296; };
+    const SS = S * S, proj = new Float64Array(SS), order = new Array(SS);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const tv = t[y * W + x];
+      if (!(tv > 0.03 && tv < 0.97)) continue;
+      const gnx = gx[y * W + x], gny = gy[y * W + x], gn = Math.hypot(gnx, gny) + 1e-9;
+      if (!(gn > 0.05)) continue;
+      const ux = Math.round(gnx / gn), uy = Math.round(gny / gn);
+      if (!(T(x + ux, y + uy) > 0.85 && T(x - ux, y - uy) < 0.15 && T(x + 2 * ux, y + 2 * uy) > 0.85 && T(x - 2 * ux, y - 2 * uy) < 0.15)) continue;
+      const nx = gnx / gn, ny = gny / gn;
+      for (let j = 0; j < S; j++) for (let i = 0; i < S; i++) { proj[j * S + i] = nx * off[i] + ny * off[j] + 1e-4 * rnd(); order[j * S + i] = j * S + i; }
+      order.sort((a, b) => proj[b] - proj[a]);
+      const k = Math.round(tv * SS);
+      for (let r = 0; r < SS; r++) {
+        const s = order[r], si = s % S, sj = (s / S) | 0;
+        mask[(y * S + sj) * BW + x * S + si] = r < k ? 1 : 0;
+      }
+    }
+    return mask;
+  }
+
+  // Gaussian blur of a binary mask + threshold at 0.5, computed only near edges (fast, low memory)
+  function blurThreshold(mask, BW, BH, sigma) {
+    const w = gaussKernel(sigma), h = (w.length - 1) / 2;
+    const tmp = new Uint8Array(BW * BH);
+    // horizontal pass -> tmp (0..255)
+    for (let y = 0; y < BH; y++) {
+      const o = y * BW;
+      for (let x = 0; x < BW; x++) tmp[o + x] = mask[o + x] * 255;
+      let last = -1e9;
+      const edges = [];
+      for (let x = 1; x < BW; x++) if (mask[o + x] !== mask[o + x - 1]) edges.push(x);
+      for (const e of edges) {
+        const x0 = Math.max(Math.max(0, e - h - 1), last + 1), x1 = Math.min(BW - 1, e + h);
+        for (let x = x0; x <= x1; x++) {
+          let s = 0; for (let k = 0; k < w.length; k++) s += w[k] * mask[o + reflect101(x + k - h, BW)];
+          tmp[o + x] = Math.round(s * 255);
+        }
+        last = Math.max(last, x1);
+      }
+    }
+    // vertical pass -> mask (0/1)
+    const col = new Uint8Array(BH), done = new Uint8Array(BH);
+    for (let x = 0; x < BW; x++) {
+      for (let y = 0; y < BH; y++) col[y] = tmp[y * BW + x];
+      done.fill(0);
+      for (let y = 0; y < BH; y++) mask[y * BW + x] = col[y] > 127 ? 1 : 0;
+      for (let y = 1; y < BH; y++) {
+        if (col[y] === col[y - 1]) continue;
+        const y0 = Math.max(0, y - h - 1), y1 = Math.min(BH - 1, y + h);
+        for (let yy = y0; yy <= y1; yy++) {
+          if (done[yy]) continue; done[yy] = 1;
+          let s = 0; for (let k = 0; k < w.length; k++) s += w[k] * col[reflect101(yy + k - h, BH)];
+          mask[yy * BW + x] = s > 127.5 ? 1 : 0;
+        }
+      }
+    }
+  }
+
+  // Border following (Suzuki & Abe 1985) -> list of closed borders (outer + holes), pixel coordinates
+  function findContours(mask, BW, BH) {
+    // states: 0 bg, 1 fg unvisited, 2 visited (positive), 3 visited with right neighbour bg (negative)
+    const dx = [1, 1, 0, -1, -1, -1, 0, 1], dy = [0, 1, 1, 1, 0, -1, -1, -1];   // E SE S SW W NW N NE (clockwise)
+    const get = (x, y) => (x < 0 || y < 0 || x >= BW || y >= BH) ? 0 : mask[y * BW + x];
+    const dirOf = (cx, cy, nx, ny) => { for (let d = 0; d < 8; d++) if (cx + dx[d] === nx && cy + dy[d] === ny) return d; return 0; };
+    const contours = [];
+    for (let y = 0; y < BH; y++) {
+      for (let x = 0; x < BW; x++) {
+        const v = mask[y * BW + x];
+        if (v === 0) continue;
+        let fx, fy;
+        if (v === 1 && get(x - 1, y) === 0) { fx = x - 1; fy = y; }
+        else if ((v === 1 || v === 2) && get(x + 1, y) === 0) { fx = x + 1; fy = y; }
+        else continue;
+        // 3.1 clockwise search from (fx, fy)
+        const d0 = dirOf(x, y, fx, fy);
+        let found = -1;
+        for (let k = 0; k < 8; k++) { const d = (d0 + k) % 8; if (get(x + dx[d], y + dy[d]) !== 0) { found = d; break; } }
+        if (found < 0) { mask[y * BW + x] = 3; contours.push([[x, y]]); continue; }
+        const x1 = x + dx[found], y1 = y + dy[found];
+        let x2 = x1, y2 = y1, x3 = x, y3 = y;
+        const pts = [];
+        for (let guard = 0; guard < 4 * BW * BH; guard++) {
+          pts.push([x3, y3]);
+          const d2 = dirOf(x3, y3, x2, y2);
+          let d4 = -1, eastZero = false;
+          for (let k = 1; k <= 8; k++) {                  // 3.3 counter-clockwise search
+            const d = (d2 - k + 16) % 8;
+            if (get(x3 + dx[d], y3 + dy[d]) !== 0) { d4 = d; break; }
+            if (d === 0) eastZero = true;
+          }
+          const i3 = y3 * BW + x3;
+          if (eastZero) mask[i3] = 3; else if (mask[i3] === 1) mask[i3] = 2;
+          const x4 = x3 + dx[d4], y4 = y3 + dy[d4];
+          if (x4 === x && y4 === y && x3 === x1 && y3 === y1) break;
+          x2 = x3; y2 = y3; x3 = x4; y3 = y4;
+        }
+        contours.push(pts);
+      }
+    }
+    return contours;
+  }
+
+  function median(arr) {
+    if (!arr.length) return 0;
+    const a = Float64Array.from(arr).sort(), n = a.length;
+    return n % 2 ? a[(n - 1) / 2] : (a[n / 2 - 1] + a[n / 2]) / 2;
+  }
+  const hex = (c) => '#' + c.map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
+
+  // ---------------------------------------------------------------- main entry
+  function vectorizeRGBA(rgba, W, H, onProgress) {
+    const t0 = Date.now();
+    const progress = (msg) => { if (onProgress) onProgress(msg); };
+    const N = W * H;
+    // colours
+    const bord = [[], [], [], []];
+    const pushB = (x, y) => { const o = (y * W + x) * 4; for (let c = 0; c < 4; c++) bord[c].push(rgba[o + c]); };
+    for (let x = 0; x < W; x++) { pushB(x, 0); pushB(x, H - 1); }
+    for (let y = 0; y < H; y++) { pushB(0, y); pushB(W - 1, y); }
+    let bgc = [median(bord[0]), median(bord[1]), median(bord[2])];
+    let amean = 0; for (let i = 0; i < N; i++) amean += rgba[i * 4 + 3];
+    amean /= N * 255;
+    const topBottomAlpha = []; for (let x = 0; x < W; x++) { topBottomAlpha.push(rgba[x * 4 + 3], rgba[((H - 1) * W + x) * 4 + 3]); }
+    if (amean < 0.999 && median(topBottomAlpha) < 128) bgc = [255, 255, 255];
+    const rgb = new Float32Array(N * 3), dist = new Float32Array(N);
+    let dmax = 0;
+    for (let i = 0; i < N; i++) {
+      const a = rgba[i * 4 + 3] / 255;
+      let d2 = 0;
+      for (let c = 0; c < 3; c++) { const v = rgba[i * 4 + c] * a + bgc[c] * (1 - a); rgb[i * 3 + c] = v; d2 += (v - bgc[c]) ** 2; }
+      dist[i] = Math.sqrt(d2); if (dist[i] > dmax) dmax = dist[i];
+    }
+    if (dmax < 30) throw new Error("L'image ne contient pas de logo visible (une seule couleur).");
+    const fgs = [[], [], []];
+    for (let i = 0; i < N; i++) if (dist[i] > 0.8 * dmax) for (let c = 0; c < 3; c++) fgs[c].push(rgb[i * 3 + c]);
+    const fgc = fgs.map(median);
+    const v = [fgc[0] - bgc[0], fgc[1] - bgc[1], fgc[2] - bgc[2]], vv = v[0] ** 2 + v[1] ** 2 + v[2] ** 2;
+    const t = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      const p = ((rgb[i * 3] - bgc[0]) * v[0] + (rgb[i * 3 + 1] - bgc[1]) * v[1] + (rgb[i * 3 + 2] - bgc[2]) * v[2]) / vv;
+      t[i] = clip(p, 0, 1);
+    }
+    // supersampling factor under the memory guard
+    S = 8;
+    while (S > 3 && N * S * S > MAX_SUBPIXELS) S--;
+    ARCS = 0; USE_ARCS = true;
+    progress('Analyse des contours…');
+    const BW = W * S, BH = H * S;
+    const mask = coverageMask(t, W, H);
+    blurThreshold(mask, BW, BH, S * MASK_BLUR);
+    const contours = findContours(mask, BW, BH);
+    progress('Tracé des courbes…');
+    const paths = [];
+    let done = 0;
+    const big = contours.filter((c) => c.length >= 3);
+    for (const c of big) {
+      let a2 = 0;
+      for (let i = 0; i < c.length; i++) { const p = c[i], q = c[(i + 1) % c.length]; a2 += p[0] * q[1] - q[0] * p[1]; }
+      const areaPx = Math.abs(a2 / 2);
+      done++;
+      if (areaPx < S * S * 0.8) continue;
+      const a0 = areaPx / S / S;
+      const raw = c.map((p) => [(p[0] + 0.5) / S, (p[1] + 0.5) / S]);
+      let d = null;
+      try { d = trace(raw); } catch (e) { d = null; }
+      if (d === null || Math.abs(pathArea(d) - a0) / a0 > 0.05) {
+        USE_ARCS = false;
+        let d2 = null;
+        try { d2 = trace(raw); } catch (e) { d2 = null; } finally { USE_ARCS = true; }
+        if (d2 !== null && (d === null || Math.abs(pathArea(d2) - a0) < Math.abs(pathArea(d) - a0))) d = d2;
+      }
+      if (d) paths.push(d);
+      if (done % 10 === 0) progress(`Tracé des courbes… ${Math.round(100 * done / big.length)} %`);
+    }
+    const fg = hex(fgc), bg = hex(bgc);
+    const body = `<path fill="${fg}" fill-rule="evenodd" d="${paths.join('')}"/>`;
+    const head = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">`;
+    return {
+      svg: head + `<rect width="${W}" height="${H}" fill="${bg}"/>` + body + '</svg>',
+      svg_transparent: head + body + '</svg>',
+      width: W, height: H, fg, bg, shapes: paths.length, arcs: ARCS, ms: Date.now() - t0,
+    };
+  }
+
+  const api = { vectorizeRGBA };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  root.LogoVectorizer = api;
+})(typeof self !== 'undefined' ? self : this);
