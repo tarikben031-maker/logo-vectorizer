@@ -897,9 +897,46 @@
       }
     }
     // merge near-identical colours
-    const out = [];
+    let out = [];
     for (const c of C) if (!out.some((o) => Math.hypot(o[0] - c[0], o[1] - c[1], o[2] - c[2]) < 18)) out.push(c);
+    if (colors === 'auto' || !colors) out = mergeInterleaved(rgb, W, H, out);
     return out;
+  }
+
+  // Two close colours whose pixels are interleaved (noise / compression) are one colour.
+  // Real colours (even close shades of a gradient) occupy separate, compact areas.
+  function mergeInterleaved(rgb, W, H, pal) {
+    const N = W * H;
+    for (let round = 0; round < 12 && pal.length > 2; round++) {
+      const K = pal.length, lbl = new Uint8Array(N), area = new Float64Array(K);
+      for (let i = 0; i < N; i++) {
+        let best = 0, bd = Infinity;
+        for (let c = 0; c < K; c++) { const d = (rgb[i * 3] - pal[c][0]) ** 2 + (rgb[i * 3 + 1] - pal[c][1]) ** 2 + (rgb[i * 3 + 2] - pal[c][2]) ** 2; if (d < bd) { bd = d; best = c; } }
+        lbl[i] = best; area[best]++;
+      }
+      const bnd = new Float64Array(K * K);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const i = y * W + x, a = lbl[i];
+        if (x + 1 < W) { const b = lbl[i + 1]; if (a !== b) { bnd[a * K + b]++; bnd[b * K + a]++; } }
+        if (y + 1 < H) { const b = lbl[i + W]; if (a !== b) { bnd[a * K + b]++; bnd[b * K + a]++; } }
+      }
+      let best = null;
+      for (let a = 0; a < K; a++) for (let b = a + 1; b < K; b++) {
+        const d = Math.hypot(pal[a][0] - pal[b][0], pal[a][1] - pal[b][1], pal[a][2] - pal[b][2]);
+        if (d > 45) continue;
+        const small = Math.min(area[a], area[b]);
+        if (small < 1) { best = { a, b, score: 99 }; break; }
+        // shared border relative to the smaller colour's area: a compact region has a small ratio
+        const ratio = bnd[a * K + b] / small;
+        const score = ratio * (1 - d / 60);
+        if (ratio > 1.2 && (!best || score > best.score)) best = { a, b, score };
+      }
+      if (!best) break;
+      const { a, b } = best, wa = area[a], wb = area[b], wt = Math.max(1, wa + wb);
+      const merged = [0, 1, 2].map((k) => (pal[a][k] * wa + pal[b][k] * wb) / wt);
+      pal = pal.filter((_, i) => i !== a && i !== b).concat([merged]);
+    }
+    return pal;
   }
 
   // Each pixel = mix of two palette colours: returns colour indices + mixing weight
@@ -919,6 +956,51 @@
         const ex = vx - t * d[0], ey = vy - t * d[1], ez = vz - t * d[2], e = ex * ex + ey * ey + ez * ez;
         if (e < best) { best = e; ia[i] = a; ib[i] = b; al[i] = t; }
       }
+    }
+    return { ia, ib, al };
+  }
+
+  // Like decompose(), but each pixel may only mix colours present around it (5x5, after denoising):
+  // prevents fringes of a third colour along edges and noise specks inside light areas.
+  function decomposeLocal(rgb, W, H, pal) {
+    const N = W * H, K = pal.length;
+    let lbl = new Uint8Array(N);
+    for (let i = 0; i < N; i++) {
+      let best = 0, bd = Infinity;
+      for (let c = 0; c < K; c++) { const d = (rgb[i * 3] - pal[c][0]) ** 2 + (rgb[i * 3 + 1] - pal[c][1]) ** 2 + (rgb[i * 3 + 2] - pal[c][2]) ** 2; if (d < bd) { bd = d; best = c; } }
+      lbl[i] = best;
+    }
+    const cnt = new Int32Array(K);
+    for (let pass = 0; pass < 2; pass++) {
+      const out = lbl.slice();
+      for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+        const i = y * W + x; cnt.fill(0);
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) cnt[lbl[i + dy * W + dx]]++;
+        let m = lbl[i]; for (let c = 0; c < K; c++) if (cnt[c] > cnt[m]) m = c;
+        if (cnt[m] >= 5) out[i] = m;
+      }
+      lbl = out;
+    }
+    const ia = new Uint8Array(N), ib = new Uint8Array(N), al = new Float32Array(N);
+    const present = new Uint8Array(K);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      present.fill(0);
+      for (let dy = -2; dy <= 2; dy++) { const yy = y + dy; if (yy < 0 || yy >= H) continue;
+        for (let dx = -2; dx <= 2; dx++) { const xx = x + dx; if (xx < 0 || xx >= W) continue; present[lbl[yy * W + xx]] = 1; } }
+      const cl = []; for (let c = 0; c < K; c++) if (present[c]) cl.push(c);
+      if (cl.length === 1) { ia[i] = ib[i] = cl[0]; al[i] = 1; continue; }
+      const r = rgb[i * 3], g = rgb[i * 3 + 1], b = rgb[i * 3 + 2];
+      let best = Infinity;
+      for (let u = 0; u < cl.length; u++) for (let v = u + 1; v < cl.length; v++) {
+        const A = pal[cl[u]], B = pal[cl[v]], d0 = A[0] - B[0], d1 = A[1] - B[1], d2 = A[2] - B[2], dd = d0 * d0 + d1 * d1 + d2 * d2;
+        const vx = r - B[0], vy = g - B[1], vz = b - B[2];
+        const t = dd > 0 ? clip((vx * d0 + vy * d1 + vz * d2) / dd, 0, 1) : 1;
+        const e = (vx - t * d0) ** 2 + (vy - t * d1) ** 2 + (vz - t * d2) ** 2;
+        if (e < best) { best = e; ia[i] = cl[u]; ib[i] = cl[v]; al[i] = t; }
+      }
+      // pixels deep inside a denoised area keep that colour (noise in light areas)
+      if (cl.length === 2 && lbl[i] !== ia[i] && lbl[i] !== ib[i]) { ia[i] = ib[i] = lbl[i]; al[i] = 1; }
     }
     return { ia, ib, al };
   }
@@ -1059,7 +1141,7 @@
         if (lbl[i] === edgeA[i] || lbl[i] === edgeB[i]) { ia[i] = edgeA[i]; ib[i] = edgeB[i]; al[i] = edgeT[i]; }
       }
     } else {
-      ({ ia, ib, al } = decompose(rgb, N, pal));
+      ({ ia, ib, al } = K0 > 2 ? decomposeLocal(rgb, W, H, pal) : decompose(rgb, N, pal));
     }
     // stacking order: largest colours at the bottom, smaller details on top
     const tsilSmooth = illus ? blurFloat(tsil, W, H, 0.6) : null;
