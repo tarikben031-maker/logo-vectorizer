@@ -17,6 +17,7 @@
   // precision profile: 'logo' (flat colours, maximum fidelity) or 'illus' (gradients, smoother curves)
   let DP_EPS = 0.2, FIT_TOL = 0.25, SMOOTH_MAX = 0.75;
   let CLEAN_PX = (typeof process !== 'undefined' && process.env && process.env.VCP) ? +process.env.VCP : 0;
+  let TIP_REBUILD = !((typeof process !== 'undefined' && process.env && process.env.VNOTIP));
   let LAYER_BLUR = (typeof process !== 'undefined' && process.env && process.env.VLB) ? +process.env.VLB : 0.7;
   function setProfile(illus) {
     if (illus) { DP_EPS = 0.45; FIT_TOL = 0.5; SMOOTH_MAX = 2.0; ARC_RMAX = 5000; BIG_ARCS = true; }
@@ -401,7 +402,7 @@
       const m = VV.length;
       let best = null;
       for (let k = 0; k < m; k++) {
-        for (const j of [1, 2, 3]) {
+        for (const j of [1, 2, 3, 4, 5]) {
           if (j + 3 > m) break;
           const ids = []; for (let q = 0; q <= j; q++) ids.push((k + q) % m);
           const A = VV[mod(k - 1, m)].p, D = VV[(k + j + 1) % m].p;
@@ -409,9 +410,16 @@
           let inner = 0; for (let q = 0; q < j; q++) inner += norm(sub(pts_[q + 1], pts_[q]));
           const B = pts_[0], E = pts_[pts_.length - 1];
           const la = norm(sub(B, A)), ld = norm(sub(D, E));
-          if (inner > MERGE_LEN + 0.55 * (j - 1)) {
+          const tipTot = Math.abs(sang(sub(B, A), sub(D, E)));
+          let tipMode = false;
+          if (j > 3 || inner > MERGE_LEN + 0.55 * (j - 1)) {
             // wider antialias/noise split: only between long straight-ish edges
-            if (!(inner <= 1.8 + 0.4 * (j - 1) && Math.min(la, ld) >= Math.max(3.5, 3.5 * inner))) continue;
+            const okCorner = j <= 3 && inner <= 1.8 + 0.4 * (j - 1) && Math.min(la, ld) >= Math.max(3.5, 3.5 * inner);
+            // blurred wedge tip (lines crossing, a colour thinning to a point): rebuild the sharp tip
+            tipMode = TIP_REBUILD && tipTot > 125 && inner <= 5 && Math.min(la, ld) >= Math.max(5, 2.2 * inner);
+            // blurred corner (e.g. the crotch where two strokes cross)
+            if (!tipMode && TIP_REBUILD && tipTot >= 70 && inner <= 3.5 && Math.min(la, ld) >= Math.max(4, 1.8 * inner)) tipMode = true;
+            if (!okCorner && !tipMode) continue;
           }
           if (j > 1 && (Math.min(la, ld) < 1.0 || Math.min(la, ld) < 1.5 * inner)) continue;
           const seq = [A].concat(pts_, [D]);
@@ -425,7 +433,7 @@
           if (tot < 55 || tot > 178) continue;
           const x = intersect(A, unit(sub(B, A)), D, unit(sub(D, E)));
           if (!x) continue;
-          const lim = tot <= 150 ? 0.75 : 1.4;
+          const lim = tipMode ? (tot > 125 ? Math.min(4.5, Math.max(1.4, 0.4 * Math.min(la, ld))) : Math.min(2.2, Math.max(0.9, 0.35 * Math.min(la, ld)))) : (tot <= 150 ? 0.75 : 1.4);
           let md = Infinity; for (const p of pts_) md = Math.min(md, norm(sub(p, x)));
           if (md > lim) continue;
           const score = inner / j;
@@ -511,10 +519,10 @@
         for (const p of pts) {
           const d = cross(v, sub(p, pu)) / L;
           if (Math.abs(d) > tol) return false;
-          if (d > 0.08) pos_++; else if (d < -0.08) neg_++;
+          if (d > 0.05) pos_++; else if (d < -0.05) neg_++;
         }
         // systematic bulge on one side = gentle curve, not a straight edge
-        if (Math.max(pos_, neg_) > 0.7 * pts.length && lineDev(pts, pu, pw) > 0.18) return false;
+        if (Math.max(pos_, neg_) > 0.6 * pts.length && lineDev(pts, pu, pw) > 0.1) return false;
         return true;
       };
       for (let c = 0; c < chain.length - 1; c++) {
@@ -536,6 +544,11 @@
         const sw = cross(sub(V[w], V[mod(w - 1, m)]), sub(V[(w + 1) % m], V[w]));
         const extremum = !cornerSet.has(u) && !cornerSet.has(w) && su * sw > 0;
         if (extremum && dv > 0.03) continue;
+        if (!axis && dv > 0.06) {                    // gentle arc: points all on one side of the chord
+          let ps = 0, ng = 0;
+          for (const p of inner) { const d = cross(dv_, sub(p, pu)) / L; if (d > 0.04) ps++; else if (d < -0.04) ng++; }
+          if (Math.max(ps, ng) > 0.65 * inner.length) continue;
+        }
         if (dv < Math.min(0.3, Math.max(0.1, 0.015 * L)) && (dv < 0.045 || L >= 1.8 * nb) && (axis || L >= 6)) lines.push([u, w]);
       }
       const pieces = []; let cur = ka;
