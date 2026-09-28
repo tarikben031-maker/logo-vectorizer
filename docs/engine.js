@@ -20,10 +20,15 @@
   let CUR_T = null, CUR_W = 0, CUR_H = 0;
   let TIP_REBUILD = !((typeof process !== 'undefined' && process.env && process.env.VNOTIP));
   let LAYER_BLUR = (typeof process !== 'undefined' && process.env && process.env.VLB) ? +process.env.VLB : 0.7;
-  function setProfile(illus) {
+  function setProfile(illus, style) {
     if (illus) { DP_EPS = 0.45; FIT_TOL = 0.5; SMOOTH_MAX = 2.0; ARC_RMAX = 5000; BIG_ARCS = true; }
+    else if (style === 'clean') {
+      // idealised shapes (vectorizer.ai-like): smoother curves, large exact circles, fewer points
+      DP_EPS = +(ENV('VDP') || 0.26); FIT_TOL = +(ENV('VFT') || 0.34); SMOOTH_MAX = +(ENV('VSM') || 1.1); ARC_RMAX = 25.0; BIG_ARCS = false;
+    }
     else { DP_EPS = 0.2; FIT_TOL = 0.25; SMOOTH_MAX = 0.75; ARC_RMAX = 25.0; BIG_ARCS = false; }
   }
+  function ENV(k) { return (typeof process !== 'undefined' && process.env) ? process.env[k] : undefined; }
   const MAX_SUBPIXELS = 110e6;       // memory guard for the supersampled mask
   const DEG = 180 / Math.PI;
 
@@ -1212,6 +1217,7 @@
     const t0 = Date.now();
     const progress = (msg) => { if (onProgress) onProgress(msg); };
     const colorsOpt = (opts && opts.colors) || 'auto';
+    const styleOpt = (opts && opts.style) || ENV('VSTYLE') || 'clean';
     const N = W * H;
     // background colour from the border (white for transparent images)
     const bord = [[], [], []];
@@ -1238,7 +1244,7 @@
     if (pal.length < 2) throw new Error("L'image ne contient pas de logo visible (une seule couleur).");
     const K0 = pal.length;
     const illus = K0 > 5;                         // many colours: gradients / illustration
-    setProfile(illus);
+    setProfile(illus, styleOpt);
     let ia, ib, al, tsil = null;
     if (illus) {
       progress('Simplification des couleurs…');
