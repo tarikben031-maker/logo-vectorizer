@@ -938,7 +938,7 @@
     if (pal.length < 2) throw new Error("L'image ne contient pas de logo visible (une seule couleur).");
     const K0 = pal.length;
     const illus = K0 > 5;                         // many colours: gradients / illustration
-    let ia, ib, al;
+    let ia, ib, al, tsil = null;
     if (illus) {
       progress('Simplification des couleurs…');
       let lbl = new Uint8Array(N);
@@ -964,7 +964,7 @@
         if (smoothPx[i]) continue;
         const cand = new Set();
         for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) { const j = i + dy * W + dx; if (smoothPx[j]) cand.add(lbl[j]); }
-        if (!cand.size) continue;
+        cand.add(0);                                   // the background is always a candidate
         const cl = [...cand], r = rgb[i * 3], g = rgb[i * 3 + 1], b = rgb[i * 3 + 2];
         let bestE = Infinity, bestL = lbl[i], bu = lbl[i], bv = lbl[i], bt = 1;
         for (let u = 0; u < cl.length; u++) for (let v = u; v < cl.length; v++) {
@@ -990,6 +990,22 @@
         }
         lbl = out;
       }
+      // silhouette (logo vs background) from antialiasing: pixel = mix(background, one logo colour)
+      tsil = new Float32Array(N);
+      const B0 = pal[0];
+      for (let i = 0; i < N; i++) {
+        const vx = rgb[i * 3] - B0[0], vy = rgb[i * 3 + 1] - B0[1], vz = rgb[i * 3 + 2] - B0[2];
+        let best = Infinity, ba = 0, bcol = 1;
+        for (let c = 1; c < K0; c++) {
+          const d0 = pal[c][0] - B0[0], d1 = pal[c][1] - B0[1], d2 = pal[c][2] - B0[2], dd = d0 * d0 + d1 * d1 + d2 * d2;
+          const tt = dd > 0 ? clip((vx * d0 + vy * d1 + vz * d2) / dd, 0, 1) : 0;
+          const e = (vx - tt * d0) ** 2 + (vy - tt * d1) ** 2 + (vz - tt * d2) ** 2;
+          if (e < best) { best = e; ba = tt; bcol = c; }
+        }
+        tsil[i] = ba;
+        // pixels inside the silhouette must carry a logo colour (otherwise the bottom layer shows through)
+        if (lbl[i] === 0 && ba > 0.1) lbl[i] = bcol;
+      }
       ia = lbl.slice(); ib = lbl.slice(); al = new Float32Array(N).fill(1);
       for (let i = 0; i < N; i++) if (isEdge[i] && edgeA[i] !== edgeB[i]) {
         // keep the soft antialiasing only where the majority filter agreed with one of the two colours
@@ -1013,7 +1029,10 @@
     for (let L = 0; L < order.length; L++) {
       // layer L covers its own colour and every colour stacked above it (no gaps between colours)
       for (let i = 0; i < N; i++) t[i] = al[i] * (rank[ia[i]] >= L ? 1 : 0) + (1 - al[i]) * (rank[ib[i]] >= L ? 1 : 0);
-      if (illus) t.set(blurFloat(t, W, H, 0.5));
+      if (illus) {
+        if (L === 0) t.set(tsil);
+        else { const tb = blurFloat(t, W, H, 0.5); for (let i = 0; i < N; i++) t[i] = Math.min(tb[i], tsil[i]); }
+      }
       const label = order.length > 1 ? `Couleur ${L + 1}/${order.length} — ` : 'Tracé des courbes… ';
       progress(label);
       const paths = traceLayer(t, W, H, progress, label, illus ? 3 : 0.8);
