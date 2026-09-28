@@ -1,5 +1,5 @@
 /* Runs the vectorizer off the main thread so the page stays responsive. */
-importScripts('engine.js');
+importScripts('engine.js' + (self.location.search || ''));
 
 self.onmessage = (e) => {
   const { rgba, width, height, colors } = e.data;

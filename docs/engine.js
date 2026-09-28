@@ -764,9 +764,9 @@
       for (let x = 0; x < BW; x++) {
         const v = mask[y * BW + x];
         if (v === 0) continue;
-        let fx, fy;
+        let fx, fy, hole = false;
         if (v === 1 && get(x - 1, y) === 0) { fx = x - 1; fy = y; }
-        else if ((v === 1 || v === 2) && get(x + 1, y) === 0) { fx = x + 1; fy = y; }
+        else if ((v === 1 || v === 2) && get(x + 1, y) === 0) { fx = x + 1; fy = y; hole = true; }
         else continue;
         // 3.1 clockwise search from (fx, fy)
         const d0 = dirOf(x, y, fx, fy);
@@ -791,6 +791,7 @@
           if (x4 === x && y4 === y && x3 === x1 && y3 === y1) break;
           x2 = x3; y2 = y3; x3 = x4; y3 = y4;
         }
+        pts.hole = hole;
         contours.push(pts);
       }
     }
@@ -1006,7 +1007,7 @@
   }
 
   // Traces one coverage map t (0 = outside, 1 = inside) into SVG path data
-  function traceLayer(t, W, H, progress, label, minArea) {
+  function traceLayer(t, W, H, progress, label, minArea, fillGaps) {
     const BW = W * S, BH = H * S;
     const mask = coverageMask(t, W, H);
     blurThreshold(mask, BW, BH, S * MASK_BLUR);
@@ -1019,6 +1020,13 @@
       for (let i = 0; i < c.length; i++) { const p = c[i], q = c[(i + 1) % c.length]; a2 += p[0] * q[1] - q[0] * p[1]; }
       const areaPx = Math.abs(a2 / 2);
       if (areaPx < S * S * minArea) continue;
+      if (fillGaps && c.hole) {
+        // gap filler: tiny or very thin background slivers between colours (JPEG halos)
+        let per = 0;
+        for (let i = 0; i < c.length; i++) { const p = c[i], q = c[(i + 1) % c.length]; per += Math.hypot(p[0] - q[0], p[1] - q[1]); }
+        const aPx = areaPx / S / S, width = 2 * aPx / Math.max(1e-9, per / S);
+        if (aPx < 6 || (aPx < 60 && width < 1.3)) continue;
+      }
       const a0 = areaPx / S / S;
       const raw = c.map((p) => [(p[0] + 0.5) / S, (p[1] + 0.5) / S]);
       let d = null;
@@ -1165,7 +1173,7 @@
       }
       const label = order.length > 1 ? `Couleur ${L + 1}/${order.length} — ` : 'Tracé des courbes… ';
       progress(label);
-      const paths = traceLayer(t, W, H, progress, label, illus ? 4 : 0.8);
+      const paths = traceLayer(t, W, H, progress, label, illus ? 4 : 0.8, L === 0 && order.length > 1);
       if (paths.length) layers.push({ color: hex(pal[order[L]]), paths });
     }
     if (!layers.length) throw new Error("L'image ne contient pas de logo visible (une seule couleur).");
