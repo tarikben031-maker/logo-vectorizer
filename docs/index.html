@@ -3,139 +3,184 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Vectoriseur de logos</title>
-<meta name="description" content="Transformez un logo PNG ou JPG en SVG vectoriel propre : angles nets, lignes droites, cercles parfaits. Gratuit, dans votre navigateur.">
+<title>Vectoriseur de logos — PNG/JPG en SVG, PDF, EPS, DXF</title>
+<meta name="description" content="Transformez un logo PNG ou JPG en vecteur propre : angles nets, lignes droites, cercles parfaits, dégradés. Export SVG, PDF, EPS, DXF, PNG. Gratuit, dans votre navigateur.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111'/%3E%3Cpath d='M8 23 16 8l8 15' fill='none' stroke='%23fff' stroke-width='3' stroke-linejoin='round'/%3E%3Ccircle cx='16' cy='8' r='2.6' fill='%23ff5a36'/%3E%3C/svg%3E">
 <style>
   :root {
-    --bg: #f6f5f2; --surface: #ffffff; --ink: #16161a; --muted: #6b6b75; --line: #e4e2dc;
-    --accent: #ff5a36; --accent-ink: #ffffff; --ok: #1f9d55; --err: #d93636;
-    --radius: 14px; --shadow: 0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.06);
+    --bg: #f6f5f2; --surface: #ffffff; --surface-2: #faf9f6; --ink: #16161a; --muted: #6b6b75; --line: #e4e2dc;
+    --accent: #ff5a36; --accent-soft: #fff0eb; --accent-ink: #ffffff; --err: #d93636;
+    --radius: 16px; --shadow: 0 1px 2px rgba(0,0,0,.04), 0 10px 30px rgba(0,0,0,.06);
     --checker: repeating-conic-gradient(#e9e7e1 0% 25%, #ffffff 0% 50%) 50% / 16px 16px;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #111114; --surface: #1a1a1f; --ink: #f2f2f4; --muted: #9a9aa6; --line: #2b2b33;
-      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
+      --bg: #111114; --surface: #1a1a1f; --surface-2: #16161a; --ink: #f2f2f4; --muted: #9a9aa6; --line: #2b2b33;
+      --accent-soft: #3a1f18;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.35);
       --checker: repeating-conic-gradient(#26262c 0% 25%, #1c1c21 0% 50%) 50% / 16px 16px;
     }
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; }
-  body {
-    background: var(--bg); color: var(--ink);
-    font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  }
-  .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 20px 64px; }
-  header { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; }
-  .logo { width: 36px; height: 36px; flex: none; }
-  h1 { font-size: 22px; margin: 0; letter-spacing: -.01em; }
-  header p { margin: 0; color: var(--muted); font-size: 14px; }
+  body { background: var(--bg); color: var(--ink); font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 20px; }
   .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+  button, select { font: inherit; }
 
-  /* Upload */
+  /* Nav */
+  nav { display: flex; align-items: center; gap: 12px; padding: 18px 0; }
+  nav .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; letter-spacing: -.01em; color: var(--ink); text-decoration: none; }
+  nav .logo { width: 32px; height: 32px; }
+  nav .links { margin-left: auto; display: flex; gap: 22px; font-size: 15px; }
+  nav .links a { color: var(--muted); text-decoration: none; }
+  nav .links a:hover { color: var(--ink); }
+
+  /* Hero */
+  .hero { text-align: center; padding: 36px 0 28px; }
+  .hero h1 { font-size: clamp(30px, 5vw, 48px); line-height: 1.1; letter-spacing: -.03em; margin: 0 0 14px; }
+  .hero h1 em { font-style: normal; color: var(--accent); }
+  .hero p.lead { font-size: 18px; color: var(--muted); max-width: 640px; margin: 0 auto 28px; }
   #drop {
-    display: grid; place-items: center; text-align: center; gap: 10px;
-    padding: 56px 20px; border: 2px dashed var(--line); border-radius: var(--radius);
-    background: var(--surface); cursor: pointer; transition: border-color .15s, background .15s;
+    display: grid; place-items: center; text-align: center; gap: 10px; max-width: 820px; margin: 0 auto;
+    padding: 52px 20px; border: 2px dashed var(--line); border-radius: 20px; background: var(--surface);
+    cursor: pointer; transition: border-color .15s, background .15s, transform .15s; box-shadow: var(--shadow);
   }
   #drop:hover, #drop.over { border-color: var(--accent); }
-  #drop.over { background: color-mix(in srgb, var(--accent) 6%, var(--surface)); }
-  #drop svg { width: 44px; height: 44px; color: var(--accent); }
-  #drop strong { font-size: 18px; }
+  #drop.over { background: var(--accent-soft); transform: scale(1.01); }
+  #drop .icon { width: 56px; height: 56px; border-radius: 16px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); }
+  #drop .icon svg { width: 28px; height: 28px; }
+  #drop strong { font-size: 20px; }
   #drop span { color: var(--muted); font-size: 14px; }
-  .btn {
-    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-    border: 1px solid var(--line); background: var(--surface); color: var(--ink);
-    padding: 10px 16px; border-radius: 10px; font: inherit; font-size: 15px; font-weight: 600;
-    cursor: pointer; text-decoration: none; white-space: nowrap;
-  }
-  .btn:hover { border-color: var(--ink); }
-  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
-  .btn.primary:hover { filter: brightness(.95); }
-  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  #drop .pick { color: var(--accent-ink); font-size: 15px; }
+  .pick { display: inline-flex; align-items: center; gap: 8px; background: var(--accent); color: var(--accent-ink); border-radius: 12px; padding: 12px 22px; font-weight: 700; margin-top: 6px; }
+  .formats-line { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 18px; }
+  .chip { font-size: 13px; color: var(--muted); border: 1px solid var(--line); background: var(--surface); padding: 4px 10px; border-radius: 999px; }
 
   /* Status */
-  #status { display: none; align-items: center; gap: 12px; padding: 16px 18px; margin-top: 16px; }
+  #status { display: none; align-items: center; gap: 14px; padding: 16px 18px; margin: 20px auto 0; max-width: 820px; }
   #status.show { display: flex; }
-  .spinner { width: 20px; height: 20px; border-radius: 50%; border: 3px solid var(--line); border-top-color: var(--accent); animation: spin .8s linear infinite; flex: none; }
+  .spinner { width: 22px; height: 22px; border-radius: 50%; border: 3px solid var(--line); border-top-color: var(--accent); animation: spin .8s linear infinite; flex: none; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  .bar { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; flex: 1; min-width: 80px; }
+  .bar i { display: block; height: 100%; width: 40%; background: var(--accent); border-radius: 3px; animation: slide 1.2s ease-in-out infinite; }
+  @keyframes slide { 0% { transform: translateX(-100%); } 100% { transform: translateX(260%); } }
   #status.error { color: var(--err); }
-  #status.error .spinner { display: none; }
+  #status.error .spinner, #status.error .bar { display: none; }
 
   /* Result */
-  #result { display: none; margin-top: 20px; }
+  #result { display: none; margin-top: 28px; }
   #result.show { display: block; }
-  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
-  .toolbar .group { display: flex; align-items: center; gap: 8px; }
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  .group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .lbl { font-size: 14px; color: var(--muted); }
   .toolbar label { font-size: 14px; color: var(--muted); display: flex; align-items: center; gap: 6px; cursor: pointer; }
-  select { font: inherit; font-size: 14px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
-  #colors { flex-wrap: wrap; }
-  input[type=color] { width: 34px; height: 34px; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: none; cursor: pointer; }
+  input[type=color] { width: 32px; height: 32px; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: none; cursor: pointer; }
   input[type=color]::-webkit-color-swatch-wrapper { padding: 3px; }
   input[type=color]::-webkit-color-swatch { border: none; border-radius: 5px; }
+  select { font-size: 14px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
   .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
-  .seg button { border: 0; background: transparent; color: var(--ink); padding: 7px 11px; font: inherit; font-size: 13px; cursor: pointer; }
+  .seg button { border: 0; background: transparent; color: var(--ink); padding: 7px 11px; font-size: 13px; cursor: pointer; }
   .seg button.on { background: var(--ink); color: var(--surface); }
   .spacer { flex: 1; }
   .panes { display: grid; grid-template-columns: 1fr 1fr; }
   .pane { min-width: 0; }
   .pane + .pane { border-left: 1px solid var(--line); }
-  .pane h3 { margin: 0; padding: 10px 16px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; border-bottom: 1px solid var(--line); }
+  .pane h3 { margin: 0; padding: 10px 16px; font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; border-bottom: 1px solid var(--line); }
   .view { height: 520px; overflow: auto; background: var(--checker); }
   .view .inner { min-width: 100%; min-height: 100%; display: grid; place-items: center; padding: 16px; }
   .view img, .view .svgbox { display: block; max-width: none; }
-  .view img { image-rendering: auto; }
   .view .svgbox svg { display: block; width: 100%; height: 100%; }
   .stats { padding: 12px 16px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 18px; }
   .stats b { color: var(--ink); font-weight: 600; }
-  .actions { display: flex; flex-wrap: wrap; gap: 10px; padding: 16px; border-top: 1px solid var(--line); }
 
-  /* API doc */
-  details { margin-top: 28px; }
-  summary { cursor: pointer; font-weight: 600; padding: 14px 16px; }
-  .doc { padding: 0 16px 16px; font-size: 14px; color: var(--muted); }
-  pre { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; overflow-x: auto; color: var(--ink); font-size: 13px; }
-  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  footer { margin-top: 28px; text-align: center; color: var(--muted); font-size: 13px; }
+  /* Download panel */
+  .dl { padding: 22px 20px 24px; border-top: 1px solid var(--line); background: var(--surface-2); border-radius: 0 0 var(--radius) var(--radius); }
+  .dl-head { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+  .dl-head h2 { margin: 0; font-size: 22px; letter-spacing: -.01em; }
+  .dl-head .sub { color: var(--muted); font-size: 14px; }
+  .dl h4 { margin: 18px 0 10px; font-size: 14px; }
+  .opts { display: grid; gap: 10px; }
+  .opts.fmt { grid-template-columns: repeat(5, 1fr); }
+  .opts.use { grid-template-columns: repeat(3, 1fr); }
+  .opt { position: relative; text-align: left; border: 1.5px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 12px; padding: 14px; cursor: pointer; transition: border-color .12s, background .12s; }
+  .opt:hover { border-color: var(--muted); }
+  .opt.on { border-color: var(--accent); background: var(--accent-soft); }
+  .opt.on::after { content: ""; position: absolute; top: -8px; right: -8px; width: 22px; height: 22px; border-radius: 50%; background: var(--accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12l5 5L20 7'/%3E%3C/svg%3E") center/13px no-repeat; }
+  .opts.fmt .opt { text-align: center; }
+  .opt .ic { font-weight: 800; font-size: 13px; letter-spacing: .04em; display: inline-block; padding: 4px 8px; border-radius: 6px; color: #fff; margin-bottom: 8px; }
+  .opt b { display: block; font-size: 16px; }
+  .opt small { display: block; color: var(--muted); font-size: 13px; margin-top: 2px; line-height: 1.35; }
+  .opt:disabled { opacity: .4; cursor: not-allowed; }
+  .dl-foot { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 18px; }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); padding: 11px 18px; border-radius: 12px; font-size: 15px; font-weight: 600; cursor: pointer; text-decoration: none; white-space: nowrap; }
+  .btn:hover { border-color: var(--ink); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-size: 17px; padding: 14px 26px; box-shadow: 0 8px 20px rgba(255,90,54,.28); }
+  .btn.primary:hover { filter: brightness(.96); }
+  .btn:disabled { opacity: .6; cursor: progress; }
+  #pngScaleBox { display: none; }
+  #pngScaleBox.show { display: flex; }
 
+  /* Sections */
+  section.info { padding: 56px 0 8px; }
+  section.info h2 { text-align: center; font-size: 28px; letter-spacing: -.02em; margin: 0 0 26px; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  .step { padding: 22px; }
+  .step .n { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); font-weight: 800; margin-bottom: 12px; }
+  .step h3 { margin: 0 0 6px; font-size: 17px; }
+  .step p { margin: 0; color: var(--muted); font-size: 14px; }
+  details.faq { padding: 0; margin-bottom: 10px; }
+  details.faq summary { cursor: pointer; font-weight: 600; padding: 16px 18px; list-style: none; }
+  details.faq summary::-webkit-details-marker { display: none; }
+  details.faq summary::after { content: "+"; float: right; color: var(--muted); font-weight: 400; }
+  details.faq[open] summary::after { content: "–"; }
+  details.faq p { margin: 0; padding: 0 18px 16px; color: var(--muted); font-size: 15px; }
+  footer { text-align: center; color: var(--muted); font-size: 13px; padding: 40px 0 36px; }
+
+  @media (max-width: 860px) {
+    .opts.fmt { grid-template-columns: repeat(3, 1fr); }
+    .opts.use, .grid3 { grid-template-columns: 1fr; }
+    nav .links { display: none; }
+  }
   @media (max-width: 760px) {
-    .wrap { padding: 20px 16px 48px; }
+    .wrap { padding: 0 16px; }
     .panes { grid-template-columns: 1fr; }
     .pane + .pane { border-left: 0; border-top: 1px solid var(--line); }
     .view { height: 340px; }
-    .actions .btn { flex: 1 1 100%; }
+    .opts.fmt { grid-template-columns: repeat(2, 1fr); }
+    .btn.primary { width: 100%; }
   }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <header>
-    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"/><path d="M8 23 16 8l8 15" fill="none" stroke="var(--bg)" stroke-width="3" stroke-linejoin="round"/><circle cx="16" cy="8" r="2.6" fill="#ff5a36"/></svg>
-    <div>
-      <h1>Vectoriseur de logos</h1>
-      <p>PNG / JPG → SVG propre : angles nets, lignes droites, cercles parfaits.</p>
-    </div>
+  <nav>
+    <a class="brand" href="./">
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"/><path d="M8 23 16 8l8 15" fill="none" stroke="var(--bg)" stroke-width="3" stroke-linejoin="round"/><circle cx="16" cy="8" r="2.6" fill="#ff5a36"/></svg>
+      Vectoriseur
+    </a>
+    <div class="links"><a href="#comment">Comment ça marche</a><a href="#formats">Formats</a><a href="#faq">Questions</a></div>
+  </nav>
+
+  <header class="hero">
+    <h1>Transformez votre logo en <em>vecteur</em><br>en quelques secondes</h1>
+    <p class="lead">PNG ou JPG → SVG, PDF, EPS, DXF. Angles nets, lignes droites, cercles parfaits, couleurs et dégradés conservés. Gratuit et sans inscription.</p>
+    <label id="drop" for="file">
+      <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg></div>
+      <strong>Déposez votre image ici</strong>
+      <span>ou collez-la avec Ctrl+V</span>
+      <span class="pick">Choisir une image</span>
+      <input id="file" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+    </label>
+    <div class="formats-line"><span class="chip">PNG · JPG · WebP en entrée</span><span class="chip">SVG · PDF · EPS · DXF · PNG en sortie</span><span class="chip">Vos images restent sur votre appareil</span></div>
+    <div id="status" class="card"><div class="spinner"></div><div id="statusText">Vectorisation…</div><div class="bar"><i></i></div></div>
   </header>
-
-  <label id="drop" for="file">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
-    <strong>Déposez votre logo ici</strong>
-    <span>ou cliquez pour choisir un fichier — vous pouvez aussi coller (Ctrl+V)</span>
-    <span>PNG, JPG ou WebP · couleurs unies ou dégradés (jusqu'à 20 couleurs)</span>
-    <input id="file" type="file" accept="image/png,image/jpeg,image/webp" hidden>
-  </label>
-
-  <div id="status" class="card"><div class="spinner"></div><div id="statusText">Vectorisation…</div></div>
 
   <section id="result" class="card" aria-live="polite">
     <div class="toolbar">
-      <div class="group">
-        <span style="font-size:14px;color:var(--muted)">Couleurs</span>
-        <span id="colors" class="group"></span>
-        <label title="Couleur du fond">Fond <input id="bg" type="color"></label>
-        <label><input id="transparent" type="checkbox"> Fond transparent</label>
-      </div>
+      <div class="group"><span class="lbl">Couleurs</span><span id="colors" class="group"></span></div>
+      <label title="Couleur du fond">Fond <input id="bg" type="color"></label>
+      <label><input id="transparent" type="checkbox"> Fond transparent</label>
       <label title="Nombre de couleurs (hors fond)">Nombre
         <select id="ncolors">
           <option value="auto" selected>Auto</option>
@@ -145,40 +190,87 @@
         </select>
       </label>
       <div class="spacer"></div>
-      <div class="group">
-        <span style="font-size:14px;color:var(--muted)">Zoom</span>
+      <div class="group"><span class="lbl">Zoom</span>
         <div class="seg" id="zoom">
-          <button data-z="fit" class="on">Ajuster</button>
-          <button data-z="2">200%</button>
-          <button data-z="4">400%</button>
-          <button data-z="8">800%</button>
+          <button data-z="fit" class="on">Ajuster</button><button data-z="2">200%</button><button data-z="4">400%</button><button data-z="8">800%</button>
         </div>
       </div>
     </div>
     <div class="panes">
       <div class="pane"><h3>Original</h3><div class="view" id="viewA"><div class="inner"><img id="orig" alt="Image originale"></div></div></div>
-      <div class="pane"><h3>SVG vectoriel</h3><div class="view" id="viewB"><div class="inner"><div class="svgbox" id="svgbox"></div></div></div></div>
+      <div class="pane"><h3>Vecteur</h3><div class="view" id="viewB"><div class="inner"><div class="svgbox" id="svgbox"></div></div></div></div>
     </div>
     <div class="stats" id="stats"></div>
-    <div class="actions">
-      <button class="btn primary" id="dlSvg">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12"/><path d="m7 11 5 5 5-5"/><path d="M4 20h16"/></svg>
-        Télécharger le SVG
-      </button>
-      <button class="btn" id="dlPng">Télécharger en PNG (4×)</button>
-      <button class="btn" id="again">Nouveau logo</button>
+
+    <div class="dl" id="formats">
+      <div class="dl-head">
+        <h2>Télécharger</h2>
+        <span class="sub" id="dlSub"></span>
+      </div>
+      <h4>Format du fichier</h4>
+      <div class="opts fmt" id="fmt">
+        <button class="opt on" data-v="svg"><span class="ic" style="background:#e8a33a">SVG</span><b>SVG</b><small>Web et applications</small></button>
+        <button class="opt" data-v="pdf"><span class="ic" style="background:#d93636">PDF</span><b>PDF</b><small>Documents, impression</small></button>
+        <button class="opt" data-v="dxf"><span class="ic" style="background:#7a1f5c">DXF</span><b>DXF</b><small>CAO et CNC</small></button>
+        <button class="opt" data-v="eps"><span class="ic" style="background:#e07a2e">EPS</span><b>EPS</b><small>Impression (ancien)</small></button>
+        <button class="opt" data-v="png"><span class="ic" style="background:#5b6bd6">PNG</span><b>PNG</b><small>Image nette, grande taille</small></button>
+      </div>
+      <h4>Optimiser pour</h4>
+      <div class="opts use" id="use">
+        <button class="opt on" data-v="general"><b>Usage général</b><small>Formes pleines aux couleurs d'origine. Convient à la plupart des logiciels.</small></button>
+        <button class="opt" data-v="edit"><b>Édition facile</b><small>Formes groupées par couleur : sélectionnez, recolorez ou supprimez une couleur d'un coup.</small></button>
+        <button class="opt" data-v="cut"><b>Découpe et gravure</b><small>Contours seuls en traits fins, prêts pour laser, plotter vinyle et gravure.</small></button>
+      </div>
+      <div class="dl-foot">
+        <div class="group" id="pngScaleBox"><span class="lbl">Taille du PNG</span>
+          <div class="seg" id="pngScale"><button data-s="1">1×</button><button data-s="2">2×</button><button data-s="4" class="on">4×</button><button data-s="8">8×</button></div>
+        </div>
+        <div class="spacer"></div>
+        <button class="btn" id="again">Nouvelle image</button>
+        <button class="btn primary" id="dlBtn">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12"/><path d="m7 11 5 5 5-5"/><path d="M4 20h16"/></svg>
+          <span id="dlLabel">Télécharger le SVG</span>
+        </button>
+      </div>
     </div>
   </section>
 
+  <section class="info" id="comment">
+    <h2>Comment ça marche</h2>
+    <div class="grid3">
+      <div class="card step"><div class="n">1</div><h3>Déposez votre image</h3><p>Un logo en PNG, JPG ou WebP, même petit ou un peu flou. Glissez-le, choisissez-le ou collez-le.</p></div>
+      <div class="card step"><div class="n">2</div><h3>Vérifiez le résultat</h3><p>Comparez avec l'original jusqu'à 800 %. Changez les couleurs, le fond ou le nombre de couleurs.</p></div>
+      <div class="card step"><div class="n">3</div><h3>Téléchargez</h3><p>SVG, PDF, EPS, DXF ou PNG haute résolution, optimisé pour l'édition, l'impression ou la découpe.</p></div>
+    </div>
+  </section>
 
-  <footer>Tout se passe dans votre navigateur : vos images ne sont jamais envoyées sur internet.</footer>
+  <section class="info">
+    <h2>Pourquoi ce vectoriseur</h2>
+    <div class="grid3">
+      <div class="card step"><h3>Formes géométriques exactes</h3><p>Les angles restent nets, les traits droits restent droits et les cercles deviennent de vrais cercles.</p></div>
+      <div class="card step"><h3>Couleurs et dégradés</h3><p>Détection automatique des couleurs, jusqu'à 20, avec les dégradés et illustrations en aplats propres.</p></div>
+      <div class="card step"><h3>Privé et gratuit</h3><p>Tout est calculé dans votre navigateur : aucune image n'est envoyée sur internet, aucune limite.</p></div>
+    </div>
+  </section>
+
+  <section class="info" id="faq">
+    <h2>Questions fréquentes</h2>
+    <details class="card faq"><summary>Quel format choisir ?</summary><p>SVG pour le web et la plupart des logiciels (Illustrator, Inkscape, Figma, Canva). PDF pour l'imprimeur. EPS pour les anciens logiciels d'impression. DXF pour la CAO, la CNC et la découpe laser. PNG pour une image nette en très grande taille.</p></details>
+    <details class="card faq"><summary>Mon logo a des dégradés, ça marche ?</summary><p>Oui : les dégradés sont transformés en bandes de couleurs unies. Choisissez « Auto » pour rester fidèle à l'original, ou un petit nombre de couleurs (3 à 6) pour un rendu plus simple et plus léger.</p></details>
+    <details class="card faq"><summary>Mes images sont-elles envoyées quelque part ?</summary><p>Non. La vectorisation se fait entièrement sur votre ordinateur ou votre téléphone. L'image ne quitte jamais votre appareil.</p></details>
+    <details class="card faq"><summary>Comment obtenir le meilleur résultat ?</summary><p>Utilisez l'image la plus grande et la plus nette possible, de préférence l'original plutôt qu'une capture d'écran.</p></details>
+  </section>
+
+  <footer>Vectoriseur de logos · tout se passe dans votre navigateur</footer>
 </div>
 
+<script src="exporters.js"></script>
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
   const MAX_SIDE = 3000, MAX_PIXELS = 6_000_000;
-  const state = { data: null, name: 'logo', zoom: 'fit', origUrl: null, file: null };
+  const state = { data: null, name: 'logo', zoom: 'fit', origUrl: null, file: null, fmt: 'svg', use: 'general', scale: 4 };
+  const FMT_LABEL = { svg: 'SVG', pdf: 'PDF', dxf: 'DXF', eps: 'EPS', png: 'PNG' };
 
   function setStatus(text, kind) {
     const s = $('status');
@@ -187,10 +279,9 @@
   }
   function clearStatus() { $('status').classList.remove('show', 'error'); }
 
-  // Decode the image to RGBA pixels (downscaled if very large)
   async function decode(file) {
     const img = await createImageBitmap(file);
-    let k = Math.min(1, MAX_SIDE / Math.max(img.width, img.height), Math.sqrt(MAX_PIXELS / (img.width * img.height)));
+    const k = Math.min(1, MAX_SIDE / Math.max(img.width, img.height), Math.sqrt(MAX_PIXELS / (img.width * img.height)));
     const w = Math.max(1, Math.round(img.width * k)), h = Math.max(1, Math.round(img.height * k));
     const c = document.createElement('canvas'); c.width = w; c.height = h;
     const ctx = c.getContext('2d', { willReadFrequently: true });
@@ -228,46 +319,48 @@
       state.origUrl = URL.createObjectURL(file);
       stage = 'Vectorisation…'; show();
       const json = await runWorker(img, (msg) => { stage = msg; show(); });
+      // layered model: one path (d) per colour, from the engine's SVG
+      const doc = new DOMParser().parseFromString(json.svg, 'image/svg+xml');
+      json.layers = [...doc.querySelectorAll('path')].map((p) => ({ color: p.getAttribute('fill'), d: p.getAttribute('d') }));
       state.data = json;
-      const colors = json.colors || [json.fg];
-      $('colors').innerHTML = colors.map((c, i) => `<input type="color" data-layer="${i}" value="${c}" title="Couleur ${i + 1}">`).join('');
+      $('colors').innerHTML = json.layers.map((l, i) => `<input type="color" data-layer="${i}" value="${l.color}" title="Couleur ${i + 1}">`).join('');
       $('bg').value = json.bg; $('transparent').checked = false;
       $('orig').src = state.origUrl;
-      render();
-      $('stats').innerHTML = `<span><b>${json.width} × ${json.height}</b> px</span><span><b>${(json.colors || [1]).length}</b> couleur${(json.colors || [1]).length > 1 ? 's' : ''}</span><span><b>${json.shapes}</b> formes</span><span><b>${json.arcs}</b> cercles exacts</span><span>calcul <b>${(json.ms / 1000).toFixed(1)} s</b></span>`;
+      const nc = json.layers.length;
+      $('stats').innerHTML = `<span><b>${json.width} × ${json.height}</b> px</span><span><b>${nc}</b> couleur${nc > 1 ? 's' : ''}</span><span><b>${json.shapes}</b> formes</span><span><b>${json.arcs}</b> cercles exacts</span><span>calcul <b>${(json.ms / 1000).toFixed(1)} s</b></span>`;
+      $('dlSub').textContent = `${state.name} · ${json.width} × ${json.height} px`;
       clearStatus();
       $('result').classList.add('show');
-      applyZoom();                       // sizes depend on the now-visible panes
+      render();
       $('result').scrollIntoView({ behavior: 'smooth', block: 'start' });
     } catch (e) {
       setStatus(e.message && !/decode|source image/i.test(e.message) ? e.message : 'Impossible de lire cette image. Utilisez un PNG, JPG ou WebP.', 'error');
     } finally { clearInterval(tick); }
   }
 
-  // Build the final SVG string from current colour / background choices
-  function currentSvg() {
-    const d = state.data; if (!d) return '';
-    const doc = new DOMParser().parseFromString(d.svg, 'image/svg+xml');
-    const svg = doc.documentElement;
+  // current model with the user's colour / background choices
+  function model() {
+    const d = state.data;
     const inputs = [...$('colors').querySelectorAll('input')];
-    svg.querySelectorAll('path').forEach((p, i) => { if (inputs[i]) p.setAttribute('fill', inputs[i].value); });
-    const rect = svg.querySelector('rect');
-    if ($('transparent').checked) rect.remove(); else rect.setAttribute('fill', $('bg').value);
-    return new XMLSerializer().serializeToString(svg);
+    return {
+      width: d.width, height: d.height,
+      background: $('transparent').checked ? null : $('bg').value,
+      layers: d.layers.map((l, i) => ({ color: inputs[i] ? inputs[i].value : l.color, d: l.d })),
+    };
   }
+  const drawStyle = () => (state.use === 'cut' ? 'outline' : 'filled');
 
   function render() {
-    const box = $('svgbox');
-    box.innerHTML = currentSvg();
+    if (!state.data) return;
+    $('svgbox').innerHTML = LogoExport.toSVG(model(), drawStyle(), state.use === 'edit').replace(/^<\?xml[^>]*>\s*/, '');
     applyZoom();
   }
 
   function applyZoom() {
     const d = state.data; if (!d) return;
-    const views = [$('viewA'), $('viewB')];
     let w, h;
     if (state.zoom === 'fit') {
-      const v = views[1];
+      const v = $('viewB');
       const k = Math.min((v.clientWidth - 32) / d.width, (v.clientHeight - 32) / d.height);
       w = d.width * k; h = d.height * k;
     } else { w = d.width * +state.zoom; h = d.height * +state.zoom; }
@@ -275,7 +368,6 @@
     $('orig').style.imageRendering = state.zoom === 'fit' ? 'auto' : 'pixelated';
   }
 
-  // Keep both panes scrolled to the same spot when zoomed in
   let syncing = false;
   for (const [a, b] of [['viewA', 'viewB'], ['viewB', 'viewA']]) {
     $(a).addEventListener('scroll', () => {
@@ -284,14 +376,33 @@
       requestAnimationFrame(() => (syncing = false));
     });
   }
-
-  $('zoom').addEventListener('click', (e) => {
-    const b = e.target.closest('button'); if (!b) return;
-    state.zoom = b.dataset.z;
-    for (const x of $('zoom').children) x.classList.toggle('on', x === b);
-    applyZoom();
+  function segClick(id, fn) {
+    $(id).addEventListener('click', (e) => {
+      const b = e.target.closest('button'); if (!b) return;
+      for (const x of $(id).children) x.classList.toggle('on', x === b);
+      fn(b);
+    });
+  }
+  segClick('zoom', (b) => {
+    state.zoom = b.dataset.z; applyZoom();
     for (const v of [$('viewA'), $('viewB')]) { v.scrollLeft = (v.scrollWidth - v.clientWidth) / 2; v.scrollTop = (v.scrollHeight - v.clientHeight) / 2; }
   });
+  segClick('pngScale', (b) => { state.scale = +b.dataset.s; });
+  function updateDlUi() {
+    $('dlLabel').textContent = `Télécharger le ${FMT_LABEL[state.fmt]}`;
+    $('pngScaleBox').classList.toggle('show', state.fmt === 'png');
+    // DXF is always outlines; editing groups only matter for SVG
+    const useBtns = [...$('use').children];
+    useBtns.forEach((b) => { b.disabled = state.fmt === 'dxf' && b.dataset.v !== 'cut'; });
+    if (state.fmt === 'dxf' && state.use !== 'cut') setUse('cut');
+  }
+  function setUse(v) {
+    state.use = v;
+    for (const x of $('use').children) x.classList.toggle('on', x.dataset.v === v);
+    render();
+  }
+  segClick('fmt', (b) => { state.fmt = b.dataset.v; updateDlUi(); });
+  $('use').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b && !b.disabled) setUse(b.dataset.v); });
   for (const id of ['colors', 'bg', 'transparent']) $(id).addEventListener('input', render);
   window.addEventListener('resize', applyZoom);
 
@@ -299,26 +410,25 @@
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
   }
-  $('dlSvg').addEventListener('click', () => {
-    const suffix = $('transparent').checked ? '-transparent' : '';
-    download(new Blob([currentSvg()], { type: 'image/svg+xml' }), `${state.name}${suffix}.svg`);
-  });
-  $('dlPng').addEventListener('click', async () => {
-    const d = state.data; const k = 4;
-    const img = new Image();
-    img.src = URL.createObjectURL(new Blob([currentSvg()], { type: 'image/svg+xml' }));
-    await img.decode();
-    const c = document.createElement('canvas'); c.width = d.width * k; c.height = d.height * k;
-    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-    URL.revokeObjectURL(img.src);
-    c.toBlob((b) => download(b, `${state.name}@4x.png`), 'image/png');
+  $('dlBtn').addEventListener('click', async () => {
+    if (!state.data) return;
+    const btn = $('dlBtn'); btn.disabled = true;
+    try {
+      const m = model(), style = drawStyle(), E = LogoExport;
+      const suffix = state.use === 'cut' ? '-decoupe' : (m.background ? '' : '-transparent');
+      const base = state.name + suffix;
+      if (state.fmt === 'svg') download(new Blob([E.toSVG(m, style, state.use === 'edit')], { type: 'image/svg+xml' }), `${base}.svg`);
+      else if (state.fmt === 'pdf') download(await E.toPDF(m, style), `${base}.pdf`);
+      else if (state.fmt === 'eps') download(E.toEPS(m, style), `${base}.eps`);
+      else if (state.fmt === 'dxf') download(E.toDXF(m), `${state.name}.dxf`);
+      else if (state.fmt === 'png') download(await E.toPNG(E.toSVG(m, style, false), m.width, m.height, state.scale), `${base}@${state.scale}x.png`);
+    } finally { btn.disabled = false; }
   });
   $('ncolors').addEventListener('change', () => { if (state.file) handle(state.file); });
   $('again').addEventListener('click', () => { $('result').classList.remove('show'); window.scrollTo({ top: 0, behavior: 'smooth' }); $('file').value = ''; $('file').click(); });
 
-  // Input methods: click, drag & drop, paste
   $('file').addEventListener('change', (e) => handle(e.target.files[0]));
   const drop = $('drop');
   ['dragenter', 'dragover'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); }));
