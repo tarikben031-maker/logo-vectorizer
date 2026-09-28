@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vectoriseur de logos</title>
+<meta name="description" content="Transformez un logo PNG ou JPG en SVG vectoriel propre : angles nets, lignes droites, cercles parfaits.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23111'/%3E%3Cpath d='M8 23 16 8l8 15' fill='none' stroke='%23fff' stroke-width='3' stroke-linejoin='round'/%3E%3Ccircle cx='16' cy='8' r='2.6' fill='%23ff5a36'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg: #f6f5f2; --surface: #ffffff; --ink: #16161a; --muted: #6b6b75; --line: #e4e2dc;
+    --accent: #ff5a36; --accent-ink: #ffffff; --ok: #1f9d55; --err: #d93636;
+    --radius: 14px; --shadow: 0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(0,0,0,.06);
+    --checker: repeating-conic-gradient(#e9e7e1 0% 25%, #ffffff 0% 50%) 50% / 16px 16px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111114; --surface: #1a1a1f; --ink: #f2f2f4; --muted: #9a9aa6; --line: #2b2b33;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
+      --checker: repeating-conic-gradient(#26262c 0% 25%, #1c1c21 0% 50%) 50% / 16px 16px;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 16px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 20px 64px; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; }
+  .logo { width: 36px; height: 36px; flex: none; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -.01em; }
+  header p { margin: 0; color: var(--muted); font-size: 14px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
+
+  /* Upload */
+  #drop {
+    display: grid; place-items: center; text-align: center; gap: 10px;
+    padding: 56px 20px; border: 2px dashed var(--line); border-radius: var(--radius);
+    background: var(--surface); cursor: pointer; transition: border-color .15s, background .15s;
+  }
+  #drop:hover, #drop.over { border-color: var(--accent); }
+  #drop.over { background: color-mix(in srgb, var(--accent) 6%, var(--surface)); }
+  #drop svg { width: 44px; height: 44px; color: var(--accent); }
+  #drop strong { font-size: 18px; }
+  #drop span { color: var(--muted); font-size: 14px; }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+    padding: 10px 16px; border-radius: 10px; font: inherit; font-size: 15px; font-weight: 600;
+    cursor: pointer; text-decoration: none; white-space: nowrap;
+  }
+  .btn:hover { border-color: var(--ink); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  .btn.primary:hover { filter: brightness(.95); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+  /* Status */
+  #status { display: none; align-items: center; gap: 12px; padding: 16px 18px; margin-top: 16px; }
+  #status.show { display: flex; }
+  .spinner { width: 20px; height: 20px; border-radius: 50%; border: 3px solid var(--line); border-top-color: var(--accent); animation: spin .8s linear infinite; flex: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #status.error { color: var(--err); }
+  #status.error .spinner { display: none; }
+
+  /* Result */
+  #result { display: none; margin-top: 20px; }
+  #result.show { display: block; }
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 18px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  .toolbar .group { display: flex; align-items: center; gap: 8px; }
+  .toolbar label { font-size: 14px; color: var(--muted); display: flex; align-items: center; gap: 6px; cursor: pointer; }
+  input[type=color] { width: 34px; height: 34px; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: none; cursor: pointer; }
+  input[type=color]::-webkit-color-swatch-wrapper { padding: 3px; }
+  input[type=color]::-webkit-color-swatch { border: none; border-radius: 5px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .seg button { border: 0; background: transparent; color: var(--ink); padding: 7px 11px; font: inherit; font-size: 13px; cursor: pointer; }
+  .seg button.on { background: var(--ink); color: var(--surface); }
+  .spacer { flex: 1; }
+  .panes { display: grid; grid-template-columns: 1fr 1fr; }
+  .pane { min-width: 0; }
+  .pane + .pane { border-left: 1px solid var(--line); }
+  .pane h3 { margin: 0; padding: 10px 16px; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; border-bottom: 1px solid var(--line); }
+  .view { height: 520px; overflow: auto; background: var(--checker); }
+  .view .inner { min-width: 100%; min-height: 100%; display: grid; place-items: center; padding: 16px; }
+  .view img, .view .svgbox { display: block; max-width: none; }
+  .view img { image-rendering: auto; }
+  .view .svgbox svg { display: block; width: 100%; height: 100%; }
+  .stats { padding: 12px 16px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 18px; }
+  .stats b { color: var(--ink); font-weight: 600; }
+  .actions { display: flex; flex-wrap: wrap; gap: 10px; padding: 16px; border-top: 1px solid var(--line); }
+
+  /* API doc */
+  details { margin-top: 28px; }
+  summary { cursor: pointer; font-weight: 600; padding: 14px 16px; }
+  .doc { padding: 0 16px 16px; font-size: 14px; color: var(--muted); }
+  pre { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; overflow-x: auto; color: var(--ink); font-size: 13px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  footer { margin-top: 28px; text-align: center; color: var(--muted); font-size: 13px; }
+
+  @media (max-width: 760px) {
+    .wrap { padding: 20px 16px 48px; }
+    .panes { grid-template-columns: 1fr; }
+    .pane + .pane { border-left: 0; border-top: 1px solid var(--line); }
+    .view { height: 340px; }
+    .actions .btn { flex: 1 1 100%; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"/><path d="M8 23 16 8l8 15" fill="none" stroke="var(--bg)" stroke-width="3" stroke-linejoin="round"/><circle cx="16" cy="8" r="2.6" fill="#ff5a36"/></svg>
+    <div>
+      <h1>Vectoriseur de logos</h1>
+      <p>PNG / JPG → SVG propre : angles nets, lignes droites, cercles parfaits.</p>
+    </div>
+  </header>
+
+  <label id="drop" for="file">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
+    <strong>Déposez votre logo ici</strong>
+    <span>ou cliquez pour choisir un fichier — vous pouvez aussi coller (Ctrl+V)</span>
+    <span>PNG, JPG ou WebP · logos à 2 couleurs (fond + une couleur)</span>
+    <input id="file" type="file" accept="image/png,image/jpeg,image/webp" hidden>
+  </label>
+
+  <div id="status" class="card"><div class="spinner"></div><div id="statusText">Vectorisation…</div></div>
+
+  <section id="result" class="card" aria-live="polite">
+    <div class="toolbar">
+      <div class="group">
+        <label title="Couleur du logo">Logo <input id="fg" type="color"></label>
+        <label title="Couleur du fond">Fond <input id="bg" type="color"></label>
+        <label><input id="transparent" type="checkbox"> Fond transparent</label>
+      </div>
+      <div class="spacer"></div>
+      <div class="group">
+        <span style="font-size:14px;color:var(--muted)">Zoom</span>
+        <div class="seg" id="zoom">
+          <button data-z="fit" class="on">Ajuster</button>
+          <button data-z="2">200%</button>
+          <button data-z="4">400%</button>
+          <button data-z="8">800%</button>
+        </div>
+      </div>
+    </div>
+    <div class="panes">
+      <div class="pane"><h3>Original</h3><div class="view" id="viewA"><div class="inner"><img id="orig" alt="Image originale"></div></div></div>
+      <div class="pane"><h3>SVG vectoriel</h3><div class="view" id="viewB"><div class="inner"><div class="svgbox" id="svgbox"></div></div></div></div>
+    </div>
+    <div class="stats" id="stats"></div>
+    <div class="actions">
+      <button class="btn primary" id="dlSvg">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12"/><path d="m7 11 5 5 5-5"/><path d="M4 20h16"/></svg>
+        Télécharger le SVG
+      </button>
+      <button class="btn" id="dlPng">Télécharger en PNG (4×)</button>
+      <button class="btn" id="again">Nouveau logo</button>
+    </div>
+  </section>
+
+  <details class="card">
+    <summary>Utiliser l'API</summary>
+    <div class="doc">
+      <p>Envoyez l'image brute en <code>POST</code> sur <code>/api/vectorize</code>. Réponse JSON avec <code>svg</code>, <code>svg_transparent</code>, les couleurs détectées et des statistiques. Ajoutez <code>?format=svg</code> pour recevoir directement le fichier SVG (et <code>&amp;transparent=1</code> pour l'avoir sans fond). Taille max : 4,4 Mo.</p>
+      <pre><code id="curl1"></code></pre>
+      <pre><code id="curl2"></code></pre>
+    </div>
+  </details>
+
+  <footer>Vectorisation 100 % algorithmique · aucune image n'est conservée sur le serveur.</footer>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const MAX_BYTES = 4_300_000;
+  const state = { data: null, name: 'logo', zoom: 'fit', origUrl: null };
+
+  const origin = location.origin.startsWith('http') ? location.origin : 'https://votre-site.vercel.app';
+  $('curl1').textContent = `curl -X POST --data-binary @logo.png \\\n  -H "Content-Type: image/png" \\\n  "${origin}/api/vectorize?format=svg" -o logo.svg`;
+  $('curl2').textContent = `curl -X POST --data-binary @logo.png \\\n  "${origin}/api/vectorize"   # réponse JSON`;
+
+  function setStatus(text, kind) {
+    const s = $('status');
+    s.classList.add('show'); s.classList.toggle('error', kind === 'error');
+    $('statusText').textContent = text;
+  }
+  function clearStatus() { $('status').classList.remove('show', 'error'); }
+
+  // Shrink images that exceed the 4.5 MB request limit (re-encode as PNG, downscale if needed)
+  async function prepare(file) {
+    if (file.size <= MAX_BYTES) return file;
+    const img = await createImageBitmap(file);
+    let scale = Math.min(1, 3000 / Math.max(img.width, img.height));
+    for (let i = 0; i < 8; i++) {
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+      const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
+      if (blob.size <= MAX_BYTES) return blob;
+      scale *= 0.8;
+    }
+    throw new Error('Image trop lourde, même après réduction.');
+  }
+
+  async function handle(file) {
+    if (!file || !file.type.startsWith('image/')) { setStatus('Choisissez une image PNG, JPG ou WebP.', 'error'); return; }
+    state.name = (file.name || 'logo').replace(/\.[^.]+$/, '') || 'logo';
+    $('result').classList.remove('show');
+    const t0 = performance.now();
+    setStatus('Vectorisation en cours… (quelques secondes)');
+    const tick = setInterval(() => setStatus(`Vectorisation en cours… ${((performance.now() - t0) / 1000).toFixed(0)} s`), 1000);
+    try {
+      const body = await prepare(file);
+      if (state.origUrl) URL.revokeObjectURL(state.origUrl);
+      state.origUrl = URL.createObjectURL(body);
+      const res = await fetch('/api/vectorize', { method: 'POST', body, headers: { 'Content-Type': body.type || 'application/octet-stream' } });
+      let json = null; try { json = await res.json(); } catch (_) {}
+      if (!res.ok) throw new Error((json && json.error) || `Erreur serveur (${res.status})`);
+      state.data = json;
+      $('fg').value = json.fg; $('bg').value = json.bg; $('transparent').checked = false;
+      $('orig').src = state.origUrl;
+      render();
+      $('stats').innerHTML = `<span><b>${json.width} × ${json.height}</b> px</span><span><b>${json.shapes}</b> formes</span><span><b>${json.arcs}</b> cercles exacts</span><span>calcul <b>${(json.ms / 1000).toFixed(1)} s</b></span>`;
+      clearStatus();
+      $('result').classList.add('show');
+      $('result').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (e) {
+      setStatus(e.message || 'Une erreur est survenue.', 'error');
+    } finally { clearInterval(tick); }
+  }
+
+  // Build the final SVG string from current colour / background choices
+  function currentSvg() {
+    const d = state.data; if (!d) return '';
+    const doc = new DOMParser().parseFromString(d.svg, 'image/svg+xml');
+    const svg = doc.documentElement;
+    svg.querySelector('path').setAttribute('fill', $('fg').value);
+    const rect = svg.querySelector('rect');
+    if ($('transparent').checked) rect.remove(); else rect.setAttribute('fill', $('bg').value);
+    return new XMLSerializer().serializeToString(svg);
+  }
+
+  function render() {
+    const box = $('svgbox');
+    box.innerHTML = currentSvg();
+    applyZoom();
+  }
+
+  function applyZoom() {
+    const d = state.data; if (!d) return;
+    const views = [$('viewA'), $('viewB')];
+    let w, h;
+    if (state.zoom === 'fit') {
+      const v = views[1];
+      const k = Math.min((v.clientWidth - 32) / d.width, (v.clientHeight - 32) / d.height);
+      w = d.width * k; h = d.height * k;
+    } else { w = d.width * +state.zoom; h = d.height * +state.zoom; }
+    for (const el of [$('orig'), $('svgbox')]) { el.style.width = w + 'px'; el.style.height = h + 'px'; }
+    $('orig').style.imageRendering = state.zoom === 'fit' ? 'auto' : 'pixelated';
+  }
+
+  // Keep both panes scrolled to the same spot when zoomed in
+  let syncing = false;
+  for (const [a, b] of [['viewA', 'viewB'], ['viewB', 'viewA']]) {
+    $(a).addEventListener('scroll', () => {
+      if (syncing) return; syncing = true;
+      $(b).scrollLeft = $(a).scrollLeft; $(b).scrollTop = $(a).scrollTop;
+      requestAnimationFrame(() => (syncing = false));
+    });
+  }
+
+  $('zoom').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    state.zoom = b.dataset.z;
+    for (const x of $('zoom').children) x.classList.toggle('on', x === b);
+    applyZoom();
+    for (const v of [$('viewA'), $('viewB')]) { v.scrollLeft = (v.scrollWidth - v.clientWidth) / 2; v.scrollTop = (v.scrollHeight - v.clientHeight) / 2; }
+  });
+  for (const id of ['fg', 'bg', 'transparent']) $(id).addEventListener('input', render);
+  window.addEventListener('resize', applyZoom);
+
+  function download(blob, name) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  }
+  $('dlSvg').addEventListener('click', () => {
+    const suffix = $('transparent').checked ? '-transparent' : '';
+    download(new Blob([currentSvg()], { type: 'image/svg+xml' }), `${state.name}${suffix}.svg`);
+  });
+  $('dlPng').addEventListener('click', async () => {
+    const d = state.data; const k = 4;
+    const img = new Image();
+    img.src = URL.createObjectURL(new Blob([currentSvg()], { type: 'image/svg+xml' }));
+    await img.decode();
+    const c = document.createElement('canvas'); c.width = d.width * k; c.height = d.height * k;
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    URL.revokeObjectURL(img.src);
+    c.toBlob((b) => download(b, `${state.name}@4x.png`), 'image/png');
+  });
+  $('again').addEventListener('click', () => { $('result').classList.remove('show'); window.scrollTo({ top: 0, behavior: 'smooth' }); $('file').value = ''; $('file').click(); });
+
+  // Input methods: click, drag & drop, paste
+  $('file').addEventListener('change', (e) => handle(e.target.files[0]));
+  const drop = $('drop');
+  ['dragenter', 'dragover'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove('over'); }));
+  drop.addEventListener('drop', (e) => handle(e.dataTransfer.files[0]));
+  window.addEventListener('paste', (e) => {
+    const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith('image/'));
+    if (item) handle(item.getAsFile());
+  });
+})();
+</script>
+</body>
+</html>
