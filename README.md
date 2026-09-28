@@ -8,8 +8,9 @@ angles nets, lignes droites, cercles parfaits, courbes lisses.
 
 - **`docs/` — version navigateur (recommandée)** : tout tourne dans le navigateur du visiteur
   (JavaScript + Web Worker). Aucun serveur, aucune limite, gratuit, images jamais envoyées.
-  **Multicolore** : détecte jusqu'à 8 couleurs et trace une couche par couleur, empilées sans
-  jour entre les couleurs ; chaque couleur est modifiable avant le téléchargement.
+  **Multicolore** : détecte automatiquement les couleurs (k-means, jusqu'à 20, dégradés compris)
+  ou un nombre choisi ; une couche par couleur, empilées sans jour entre les couleurs ; chaque
+  couleur est modifiable avant le téléchargement. Les dégradés deviennent des aplats (postérisation).
   Hébergement : **GitHub Pages**.
 - **Racine — version serveur** (FastAPI, pour Vercel) : même algorithme en Python, avec une API HTTP.
 
@@ -70,7 +71,7 @@ curl -X POST --data-binary @logo.png "https://VOTRE-SITE.vercel.app/api/vectoriz
 
 ## Limites
 
-- Version serveur (Python) : logos à **2 couleurs** (fond + une couleur). La version navigateur gère jusqu'à 8 couleurs.
+- Version serveur (Python) : logos à **2 couleurs** (fond + une couleur). La version navigateur gère jusqu'à 20 couleurs.
 - Image max **4,4 Mo** (limite Vercel) ; le site réduit automatiquement les images plus lourdes.
   Les images de plus de 3000 px sont réduites à 3000 px avant la vectorisation.
 - Temps de calcul : 2 à 15 s selon la taille du logo.

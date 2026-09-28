@@ -759,41 +759,101 @@
   const hex = (c) => '#' + c.map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
 
   // ---------------------------------------------------------------- palette (multi-colour)
-  // Finds the real colours of the logo from "flat" pixels (antialiased edge pixels are ignored).
-  function findPalette(rgb, W, H, maxColors) {
-    const N = W * H, flat = new Uint8Array(N);
+  // k-means on "smooth" pixels (antialiased edge pixels are ignored). With colours = 'auto' the
+  // number of colours grows until almost every smooth pixel is close to a palette colour.
+  function choosePalette(rgb, W, H, colors) {
+    const N = W * H, smooth = [];
     for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
       const i = y * W + x; let dmax = 0;
       for (const j of [i - 1, i + 1, i - W, i + W, i - W - 1, i - W + 1, i + W - 1, i + W + 1]) {
         const d = Math.abs(rgb[i * 3] - rgb[j * 3]) + Math.abs(rgb[i * 3 + 1] - rgb[j * 3 + 1]) + Math.abs(rgb[i * 3 + 2] - rgb[j * 3 + 2]);
         if (d > dmax) dmax = d;
       }
-      if (dmax <= 24) flat[i] = 1;
+      if (dmax <= 48) smooth.push(i);
     }
-    const bins = new Map(); let nFlat = 0;
-    for (let i = 0; i < N; i++) {
-      if (!flat[i]) continue; nFlat++;
-      const r = rgb[i * 3], g = rgb[i * 3 + 1], b = rgb[i * 3 + 2];
-      const key = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
-      let e = bins.get(key); if (!e) { e = [0, 0, 0, 0]; bins.set(key, e); }
-      e[0]++; e[1] += r; e[2] += g; e[3] += b;
-    }
-    const sorted = [...bins.values()].sort((p, q) => q[0] - p[0]);
-    const clusters = [];                  // [count, r, g, b] (sums)
-    const MERGE = 40;
-    for (const e of sorted) {
-      const c = [e[1] / e[0], e[2] / e[0], e[3] / e[0]];
-      let best = null, bd = Infinity;
-      for (const k of clusters) {
-        const d = Math.hypot(k[1] / k[0] - c[0], k[2] / k[0] - c[1], k[3] / k[0] - c[2]);
-        if (d < bd) { bd = d; best = k; }
+    if (smooth.length < 50) for (let i = 0; i < N; i++) smooth.push(i);
+    // deterministic sample
+    const MAXS = 24000, step = Math.max(1, smooth.length / MAXS), n = Math.min(MAXS, smooth.length);
+    const X = new Float32Array(n * 3);
+    for (let k = 0; k < n; k++) { const i = smooth[Math.floor(k * step)]; X[k * 3] = rgb[i * 3]; X[k * 3 + 1] = rgb[i * 3 + 1]; X[k * 3 + 2] = rgb[i * 3 + 2]; }
+    let seed = 7;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) >>> 0; return seed / 4294967296; };
+    const lab = new Int32Array(n), dist = new Float32Array(n);
+    function kmeans(k) {
+      // k-means++ init
+      const C = [[X[0], X[1], X[2]]];
+      const d2 = new Float64Array(n).fill(Infinity);
+      while (C.length < k) {
+        const c = C[C.length - 1]; let sum = 0;
+        for (let p = 0; p < n; p++) { const d = (X[p * 3] - c[0]) ** 2 + (X[p * 3 + 1] - c[1]) ** 2 + (X[p * 3 + 2] - c[2]) ** 2; if (d < d2[p]) d2[p] = d; sum += d2[p]; }
+        if (sum <= 0) break;
+        let r = rnd() * sum, p = 0;
+        for (; p < n - 1; p++) { r -= d2[p]; if (r <= 0) break; }
+        C.push([X[p * 3], X[p * 3 + 1], X[p * 3 + 2]]);
       }
-      if (best && bd < MERGE) { best[0] += e[0]; best[1] += e[1]; best[2] += e[2]; best[3] += e[3]; }
-      else clusters.push(e.slice());
+      for (let it = 0; it < 20; it++) {
+        const acc = C.map(() => [0, 0, 0, 0]); let moved = 0;
+        for (let p = 0; p < n; p++) {
+          let best = 0, bd = Infinity;
+          for (let c = 0; c < C.length; c++) { const d = (X[p * 3] - C[c][0]) ** 2 + (X[p * 3 + 1] - C[c][1]) ** 2 + (X[p * 3 + 2] - C[c][2]) ** 2; if (d < bd) { bd = d; best = c; } }
+          if (lab[p] !== best) moved++;
+          lab[p] = best; dist[p] = Math.sqrt(bd);
+          const a = acc[best]; a[0]++; a[1] += X[p * 3]; a[2] += X[p * 3 + 1]; a[3] += X[p * 3 + 2];
+        }
+        acc.forEach((a, c) => { if (a[0]) C[c] = [a[1] / a[0], a[2] / a[0], a[3] / a[0]]; });
+        if (it > 0 && moved < n * 0.001) break;
+      }
+      const cnt = new Int32Array(C.length); for (let p = 0; p < n; p++) cnt[lab[p]]++;
+      return C.filter((_, c) => cnt[c] > Math.max(3, n * 0.0005));
     }
-    const minCount = Math.max(20, 0.0008 * nFlat);
-    return clusters.filter((k) => k[0] >= minCount).sort((p, q) => q[0] - p[0]).slice(0, maxColors)
-      .map((k) => [k[1] / k[0], k[2] / k[0], k[3] / k[0]]);
+    const outliers = () => { let o = 0; for (let p = 0; p < n; p++) if (dist[p] > 30) o++; return o / n; };
+    let C;
+    if (colors === 'auto' || !colors) {
+      for (let k = 2; k <= 20; k++) { C = kmeans(k); if (outliers() <= 0.0025) break; }
+    } else {
+      C = kmeans(Math.max(2, Math.min(20, +colors + 1)));   // +1: the background
+    }
+    // rare but clearly distinct colours (thin strokes): pixels that are not a mix of two palette colours
+    if (colors === 'auto' || !colors) {
+      const stepAll = Math.max(1, Math.floor(N / 80000));
+      let far = [];
+      const mixErr = (r, g, b, pal) => {
+        let best = Infinity;
+        for (let u = 0; u < pal.length; u++) for (let v = u; v < pal.length; v++) {
+          const A = pal[u], B = pal[v], d0 = A[0] - B[0], d1 = A[1] - B[1], d2 = A[2] - B[2], dd = d0 * d0 + d1 * d1 + d2 * d2;
+          const vx = r - B[0], vy = g - B[1], vz = b - B[2];
+          const tt = dd > 0 ? clip((vx * d0 + vy * d1 + vz * d2) / dd, 0, 1) : 0;
+          const ex = vx - tt * d0, ey = vy - tt * d1, ez = vz - tt * d2;
+          // hue errors count double: a green can't be explained by mixing pinks, golds and black
+          const gm = (ex + ey + ez) / 3, cx = ex - gm, cy = ey - gm, cz = ez - gm;
+          const e = 3 * gm * gm + 4 * (cx * cx + cy * cy + cz * cz);
+          if (e < best) best = e;
+        }
+        return Math.sqrt(best);
+      };
+      for (let i = 0; i < N; i += stepAll) {
+        const r = rgb[i * 3], g = rgb[i * 3 + 1], b = rgb[i * 3 + 2];
+        if (mixErr(r, g, b, C) > 28) far.push([r, g, b]);
+      }
+      const minN = Math.max(12, (N / stepAll) * 0.0004);
+      for (let round = 0; round < 4 && far.length >= minN; round++) {
+        let seedIdx = 0, bestN = -1;
+        for (let a2 = 0; a2 < far.length; a2 += Math.max(1, Math.floor(far.length / 300))) {
+          let cnt = 0; for (const q of far) if (Math.hypot(q[0] - far[a2][0], q[1] - far[a2][1], q[2] - far[a2][2]) < 28) cnt++;
+          if (cnt > bestN) { bestN = cnt; seedIdx = a2; }
+        }
+        if (bestN < minN) break;
+        const sd = far[seedIdx], m = [0, 0, 0]; let c = 0;
+        for (const q of far) if (Math.hypot(q[0] - sd[0], q[1] - sd[1], q[2] - sd[2]) < 28) { m[0] += q[0]; m[1] += q[1]; m[2] += q[2]; c++; }
+        const nc = [m[0] / c, m[1] / c, m[2] / c];
+        C.push(nc);
+        far = far.filter((q) => mixErr(q[0], q[1], q[2], [nc].concat(C)) > 28);
+      }
+    }
+    // merge near-identical colours
+    const out = [];
+    for (const c of C) if (!out.some((o) => Math.hypot(o[0] - c[0], o[1] - c[1], o[2] - c[2]) < 18)) out.push(c);
+    return out;
   }
 
   // Each pixel = mix of two palette colours: returns colour indices + mixing weight
@@ -818,7 +878,7 @@
   }
 
   // Traces one coverage map t (0 = outside, 1 = inside) into SVG path data
-  function traceLayer(t, W, H, progress, label) {
+  function traceLayer(t, W, H, progress, label, minArea) {
     const BW = W * S, BH = H * S;
     const mask = coverageMask(t, W, H);
     blurThreshold(mask, BW, BH, S * MASK_BLUR);
@@ -830,7 +890,7 @@
       let a2 = 0;
       for (let i = 0; i < c.length; i++) { const p = c[i], q = c[(i + 1) % c.length]; a2 += p[0] * q[1] - q[0] * p[1]; }
       const areaPx = Math.abs(a2 / 2);
-      if (areaPx < S * S * 0.8) continue;
+      if (areaPx < S * S * minArea) continue;
       const a0 = areaPx / S / S;
       const raw = c.map((p) => [(p[0] + 0.5) / S, (p[1] + 0.5) / S]);
       let d = null;
@@ -851,7 +911,7 @@
   function vectorizeRGBA(rgba, W, H, onProgress, opts) {
     const t0 = Date.now();
     const progress = (msg) => { if (onProgress) onProgress(msg); };
-    const maxColors = (opts && opts.maxColors) || 8;
+    const colorsOpt = (opts && opts.colors) || 'auto';
     const N = W * H;
     // background colour from the border (white for transparent images)
     const bord = [[], [], []];
@@ -869,20 +929,81 @@
       for (let c = 0; c < 3; c++) rgb[i * 3 + c] = rgba[i * 4 + c] * a + bgc[c] * (1 - a);
     }
     progress('Détection des couleurs…');
-    let pal = findPalette(rgb, W, H, maxColors);
+    let pal = choosePalette(rgb, W, H, colorsOpt);
     // put the background colour first (closest palette colour to the border colour)
     let bi = 0, bd = Infinity;
     pal.forEach((c, i) => { const d = Math.hypot(c[0] - bgc[0], c[1] - bgc[1], c[2] - bgc[2]); if (d < bd) { bd = d; bi = i; } });
     if (bd > 40) { pal.unshift(bgc.slice()); bi = 0; }
     pal = [pal[bi]].concat(pal.filter((_, i) => i !== bi));
     if (pal.length < 2) throw new Error("L'image ne contient pas de logo visible (une seule couleur).");
-    const { ia, ib, al } = decompose(rgb, N, pal);
+    const K0 = pal.length;
+    const illus = K0 > 5;                         // many colours: gradients / illustration
+    let ia, ib, al;
+    if (illus) {
+      progress('Simplification des couleurs…');
+      let lbl = new Uint8Array(N);
+      const smoothPx = new Uint8Array(N);
+      for (let i = 0; i < N; i++) {
+        let best = 0, bd = Infinity;
+        for (let c = 0; c < K0; c++) { const d = (rgb[i * 3] - pal[c][0]) ** 2 + (rgb[i * 3 + 1] - pal[c][1]) ** 2 + (rgb[i * 3 + 2] - pal[c][2]) ** 2; if (d < bd) { bd = d; best = c; } }
+        lbl[i] = best;
+      }
+      for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+        const i = y * W + x; let dmax = 0;
+        for (const j of [i - 1, i + 1, i - W, i + W]) {
+          const d = Math.abs(rgb[i * 3] - rgb[j * 3]) + Math.abs(rgb[i * 3 + 1] - rgb[j * 3 + 1]) + Math.abs(rgb[i * 3 + 2] - rgb[j * 3 + 2]);
+          if (d > dmax) dmax = d;
+        }
+        smoothPx[i] = dmax <= 30 ? 1 : 0;
+      }
+      // edge (blended) pixels: explain the pixel as a mix of two colours found among nearby smooth pixels
+      const fixed = lbl.slice();
+      const edgeA = new Uint8Array(N), edgeB = new Uint8Array(N), edgeT = new Float32Array(N), isEdge = new Uint8Array(N);
+      for (let y = 2; y < H - 2; y++) for (let x = 2; x < W - 2; x++) {
+        const i = y * W + x;
+        if (smoothPx[i]) continue;
+        const cand = new Set();
+        for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) { const j = i + dy * W + dx; if (smoothPx[j]) cand.add(lbl[j]); }
+        if (!cand.size) continue;
+        const cl = [...cand], r = rgb[i * 3], g = rgb[i * 3 + 1], b = rgb[i * 3 + 2];
+        let bestE = Infinity, bestL = lbl[i], bu = lbl[i], bv = lbl[i], bt = 1;
+        for (let u = 0; u < cl.length; u++) for (let v = u; v < cl.length; v++) {
+          const A = pal[cl[u]], B = pal[cl[v]], d = [A[0] - B[0], A[1] - B[1], A[2] - B[2]], dd = d[0] ** 2 + d[1] ** 2 + d[2] ** 2;
+          const vx = r - B[0], vy = g - B[1], vz = b - B[2];
+          const tt = dd > 0 ? clip((vx * d[0] + vy * d[1] + vz * d[2]) / dd, 0, 1) : 1;
+          const e = (vx - tt * d[0]) ** 2 + (vy - tt * d[1]) ** 2 + (vz - tt * d[2]) ** 2;
+          if (e < bestE) { bestE = e; bestL = tt >= 0.5 ? cl[u] : cl[v]; bu = cl[u]; bv = cl[v]; bt = tt; }
+        }
+        fixed[i] = bestL;
+        edgeA[i] = bu; edgeB[i] = bv; edgeT[i] = bt; isEdge[i] = 1;
+      }
+      lbl = fixed;
+      // 3x3 majority filter (twice) removes isolated pixels and speckles
+      const cnt = new Int32Array(K0);
+      for (let pass = 0; pass < 2; pass++) {
+        const out = lbl.slice();
+        for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+          const i = y * W + x; cnt.fill(0);
+          for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) cnt[lbl[i + dy * W + dx]]++;
+          let m = lbl[i]; for (let c = 0; c < K0; c++) if (cnt[c] > cnt[m]) m = c;
+          if (cnt[m] >= 5) out[i] = m;
+        }
+        lbl = out;
+      }
+      ia = lbl.slice(); ib = lbl.slice(); al = new Float32Array(N).fill(1);
+      for (let i = 0; i < N; i++) if (isEdge[i] && edgeA[i] !== edgeB[i]) {
+        // keep the soft antialiasing only where the majority filter agreed with one of the two colours
+        if (lbl[i] === edgeA[i] || lbl[i] === edgeB[i]) { ia[i] = edgeA[i]; ib[i] = edgeB[i]; al[i] = edgeT[i]; }
+      }
+    } else {
+      ({ ia, ib, al } = decompose(rgb, N, pal));
+    }
     // stacking order: largest colours at the bottom, smaller details on top
     const K = pal.length, weight = new Float64Array(K);
     for (let i = 0; i < N; i++) { weight[ia[i]] += al[i]; weight[ib[i]] += 1 - al[i]; }
     const order = [...Array(K).keys()].slice(1).sort((p, q) => weight[q] - weight[p]);
     // supersampling factor under the memory guard
-    S = 8;
+    S = pal.length > 7 ? 6 : 8;                // many colours: slightly lower supersampling (speed)
     while (S > 3 && N * S * S > MAX_SUBPIXELS) S--;
     ARCS = 0; USE_ARCS = true;
     const layers = [];
@@ -892,9 +1013,10 @@
     for (let L = 0; L < order.length; L++) {
       // layer L covers its own colour and every colour stacked above it (no gaps between colours)
       for (let i = 0; i < N; i++) t[i] = al[i] * (rank[ia[i]] >= L ? 1 : 0) + (1 - al[i]) * (rank[ib[i]] >= L ? 1 : 0);
+      if (illus) t.set(blurFloat(t, W, H, 0.5));
       const label = order.length > 1 ? `Couleur ${L + 1}/${order.length} — ` : 'Tracé des courbes… ';
       progress(label);
-      const paths = traceLayer(t, W, H, progress, label);
+      const paths = traceLayer(t, W, H, progress, label, illus ? 3 : 0.8);
       if (paths.length) layers.push({ color: hex(pal[order[L]]), paths });
     }
     if (!layers.length) throw new Error("L'image ne contient pas de logo visible (une seule couleur).");
