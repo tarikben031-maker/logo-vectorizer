@@ -12,8 +12,14 @@
 (function (root) {
   'use strict';
 
-  const DP_EPS = 0.2, FIT_TOL = 0.25, LINE_TOL = 0.2, AXIS_SNAP = 2.5, MERGE_LEN = 0.9;
-  const SMOOTH_MAX = 0.75, ARC_RMAX = 25.0, MASK_BLUR = 0.35;
+  const LINE_TOL = 0.2, AXIS_SNAP = 2.5, MERGE_LEN = 0.9, MASK_BLUR = 0.35;
+  let ARC_RMAX = 25.0, BIG_ARCS = false;
+  // precision profile: 'logo' (flat colours, maximum fidelity) or 'illus' (gradients, smoother curves)
+  let DP_EPS = 0.2, FIT_TOL = 0.25, SMOOTH_MAX = 0.75;
+  function setProfile(illus) {
+    if (illus) { DP_EPS = 0.45; FIT_TOL = 0.5; SMOOTH_MAX = 2.0; ARC_RMAX = 5000; BIG_ARCS = true; }
+    else { DP_EPS = 0.2; FIT_TOL = 0.25; SMOOTH_MAX = 0.75; ARC_RMAX = 25.0; BIG_ARCS = false; }
+  }
   const MAX_SUBPIXELS = 110e6;       // memory guard for the supersampled mask
   const DEG = 180 / Math.PI;
 
@@ -236,10 +242,10 @@
     if (!f) return null;
     const { c, r, res } = f;
     if (r < 1.2 || r > ARC_RMAX) return null;
-    if (maxOf(res) > Math.max(0.25, 0.035 * r) || rmsOf(res) > Math.max(0.1, 0.013 * r)) return null;
+    if (maxOf(res) > Math.min(0.6, Math.max(0.25, 0.035 * r)) || rmsOf(res) > Math.min(0.2, Math.max(0.1, 0.013 * r))) return null;
     if (!closed) {
       let m = 0; for (const p of pts) m = Math.max(m, Math.abs(Math.hypot(p[0] - c[0], p[1] - c[1]) - r));
-      if (m > Math.max(0.9, 0.12 * r)) return null;
+      if (m > Math.min(1.2, Math.max(0.9, 0.12 * r))) return null;
     }
     const ang = angles(pts, c);
     if (!closed && !monotone(ang, 0.02)) return null;
@@ -264,22 +270,23 @@
     const thr = new Float64Array(M - 1);
     for (let i = 0; i < M - 1; i++) thr[i] = Math.atan2(q[i + 1][1] - q[i][1], q[i + 1][0] - q[i][0]);
     const th = unwrap(thr);
-    if (ptp(th, 0, th.length) < minSweep * 0.9) return null;
+    if (!BIG_ARCS && ptp(th, 0, th.length) < minSweep * 0.9) return null;
     const lengths = [...new Set(RUN_FRACS.map((f) => Math.floor(M * f)))].sort((a, b) => b - a);
     let best = null;
     for (const L of lengths) {
       if (L < 14) break;
       const step = Math.max(1, Math.floor(L / 8));
       for (let st = 0; st <= M - L; st += step) {
-        if (ptp(th, st, Math.min(th.length, st + L - 1)) < minSweep * 0.85) continue;
+        if (!BIG_ARCS && ptp(th, st, Math.min(th.length, st + L - 1)) < minSweep * 0.85) continue;
         const seg = q.slice(st, st + L);
         const f = fitCircle(seg);
         if (!f) continue;
         const { c, r, res } = f;
         if (r < 1.5 || r > ARC_RMAX) continue;
-        if (maxOf(res) > Math.max(0.25, 0.035 * r) || rmsOf(res) > Math.max(0.09, 0.012 * r)) continue;
+        if (maxOf(res) > Math.min(0.6, Math.max(0.25, 0.035 * r)) || rmsOf(res) > Math.min(0.2, Math.max(0.09, 0.012 * r))) continue;
         const ang = angles(seg, c);
-        if (Math.abs(ang[ang.length - 1] - ang[0]) < minSweep) continue;
+        const sweepNeed = (BIG_ARCS && r > 20) ? Math.min(minSweep, 40 / r) : minSweep;
+        if (Math.abs(ang[ang.length - 1] - ang[0]) < sweepNeed) continue;
         if (!monotone(ang, 0.03)) continue;
         best = { i0: st * stepd, i1: Math.min(N - 1, (st + L - 1) * stepd), c, r };
         break;
@@ -287,7 +294,7 @@
       if (best) break;
     }
     if (!best) return null;
-    const { c, r } = best, tol = Math.max(0.25, 0.035 * r);
+    const { c, r } = best, tol = Math.min(0.6, Math.max(0.25, 0.035 * r));
     const off = (p) => Math.abs(Math.hypot(p[0] - c[0], p[1] - c[1]) - r);
     while (best.i0 > 0 && off(pts[best.i0 - 1]) < tol) best.i0--;
     while (best.i1 < N - 1 && off(pts[best.i1 + 1]) < tol) best.i1++;
@@ -938,6 +945,7 @@
     if (pal.length < 2) throw new Error("L'image ne contient pas de logo visible (une seule couleur).");
     const K0 = pal.length;
     const illus = K0 > 5;                         // many colours: gradients / illustration
+    setProfile(illus);
     let ia, ib, al, tsil = null;
     if (illus) {
       progress('Simplification des couleurs…');
@@ -1015,6 +1023,7 @@
       ({ ia, ib, al } = decompose(rgb, N, pal));
     }
     // stacking order: largest colours at the bottom, smaller details on top
+    const tsilSmooth = illus ? blurFloat(tsil, W, H, 0.6) : null;
     const K = pal.length, weight = new Float64Array(K);
     for (let i = 0; i < N; i++) { weight[ia[i]] += al[i]; weight[ib[i]] += 1 - al[i]; }
     const order = [...Array(K).keys()].slice(1).sort((p, q) => weight[q] - weight[p]);
@@ -1030,12 +1039,12 @@
       // layer L covers its own colour and every colour stacked above it (no gaps between colours)
       for (let i = 0; i < N; i++) t[i] = al[i] * (rank[ia[i]] >= L ? 1 : 0) + (1 - al[i]) * (rank[ib[i]] >= L ? 1 : 0);
       if (illus) {
-        if (L === 0) t.set(tsil);
-        else { const tb = blurFloat(t, W, H, 0.5); for (let i = 0; i < N; i++) t[i] = Math.min(tb[i], tsil[i]); }
+        if (L === 0) t.set(tsilSmooth);
+        else { const tb = blurFloat(t, W, H, 0.9); for (let i = 0; i < N; i++) t[i] = Math.min(tb[i], tsilSmooth[i]); }
       }
       const label = order.length > 1 ? `Couleur ${L + 1}/${order.length} — ` : 'Tracé des courbes… ';
       progress(label);
-      const paths = traceLayer(t, W, H, progress, label, illus ? 3 : 0.8);
+      const paths = traceLayer(t, W, H, progress, label, illus ? 4 : 0.8);
       if (paths.length) layers.push({ color: hex(pal[order[L]]), paths });
     }
     if (!layers.length) throw new Error("L'image ne contient pas de logo visible (une seule couleur).");
