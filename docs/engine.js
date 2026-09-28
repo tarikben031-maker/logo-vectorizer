@@ -932,6 +932,37 @@
         far = far.filter((q) => mixErr(q[0], q[1], q[2], [nc].concat(C)) > 28);
       }
     }
+    // small flat areas of their own colour (e.g. light dashes): real colours even if rare and even if
+    // their colour looks like a mix of two others. Only flat pixels count (edges are blends).
+    if (colors === 'auto' || !colors) {
+      const nearest = (r, g, b) => { let m = Infinity; for (const c of C) m = Math.min(m, Math.hypot(r - c[0], g - c[1], b - c[2])); return m; };
+      let pool = [];
+      for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+        const i = y * W + x; let dmax = 0;
+        for (const j of [i - 1, i + 1, i - W, i + W]) {
+          const d = Math.abs(rgb[i * 3] - rgb[j * 3]) + Math.abs(rgb[i * 3 + 1] - rgb[j * 3 + 1]) + Math.abs(rgb[i * 3 + 2] - rgb[j * 3 + 2]);
+          if (d > dmax) dmax = d;
+        }
+        if (dmax > 20) continue;
+        const r = rgb[i * 3], g = rgb[i * 3 + 1], b = rgb[i * 3 + 2];
+        if (nearest(r, g, b) > 32) pool.push([r, g, b]);
+      }
+      const minFlat = Math.max(40, N * 0.00012);
+      for (let round = 0; round < 6 && pool.length >= minFlat && C.length < 20; round++) {
+        let seed = null, bestN = -1;
+        const stp = Math.max(1, Math.floor(pool.length / 400));
+        for (let a = 0; a < pool.length; a += stp) {
+          let cnt = 0; for (let q = 0; q < pool.length; q += stp) if (Math.hypot(pool[q][0] - pool[a][0], pool[q][1] - pool[a][1], pool[q][2] - pool[a][2]) < 22) cnt++;
+          if (cnt > bestN) { bestN = cnt; seed = pool[a]; }
+        }
+        const m = [0, 0, 0]; let c = 0;
+        for (const q of pool) if (Math.hypot(q[0] - seed[0], q[1] - seed[1], q[2] - seed[2]) < 22) { m[0] += q[0]; m[1] += q[1]; m[2] += q[2]; c++; }
+        if (c < minFlat) break;
+        const nc = [m[0] / c, m[1] / c, m[2] / c];
+        C.push(nc);
+        pool = pool.filter((q) => Math.hypot(q[0] - nc[0], q[1] - nc[1], q[2] - nc[2]) > 32 && nearest(q[0], q[1], q[2]) > 32);
+      }
+    }
     // merge near-identical colours
     let out = [];
     for (const c of C) if (!out.some((o) => Math.hypot(o[0] - c[0], o[1] - c[1], o[2] - c[2]) < 18)) out.push(c);
@@ -1234,7 +1265,7 @@
     for (let a = 1; a < K; a++) for (let b = a + 1; b < K; b++)
       minGap = Math.min(minGap, Math.hypot(pal[a][0] - pal[b][0], pal[a][1] - pal[b][1], pal[a][2] - pal[b][2]));
     // clearly distinct colours (not shades of one gradient): own-colour layers, thin strokes on top
-    const flatStack = !illus && K > 2 && minGap > 90;
+    const flatStack = !illus && K > 2 && minGap > 70;
     if (flatStack) {
       // flat colours: thick fills at the bottom, thin strokes on top (their own edges stay visible)
       const area = new Float64Array(K), per = new Float64Array(K);
