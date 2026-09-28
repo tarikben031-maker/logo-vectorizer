@@ -121,6 +121,23 @@
   #pngScaleBox { display: none; }
   #pngScaleBox.show { display: flex; }
 
+  /* Mode picker */
+  .modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; max-width: 820px; margin: 0 auto 16px; }
+  .modes .opt { text-align: center; padding: 12px 10px; }
+  .modes .opt b { font-size: 15px; }
+  .tolbox { display: none; justify-content: center; margin: -4px auto 14px; font-size: 14px; color: var(--muted); gap: 8px; align-items: center; }
+  .tolbox.show { display: flex; }
+  .tag { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); background: var(--accent-soft); border-radius: 6px; padding: 2px 6px; margin-left: 4px; vertical-align: 2px; }
+
+  /* Background-removal result */
+  #rb { display: none; margin-top: 28px; }
+  #rb.show { display: block; }
+  .view.bg-white { background: #ffffff; }
+  .view.bg-black { background: #111111; }
+  .view.bg-green { background: #2f7d4a; }
+  #rbImg { display: block; max-width: none; }
+  @media (max-width: 760px) { .modes { grid-template-columns: 1fr; } }
+
   /* Sections */
   section.info { padding: 56px 0 8px; }
   section.info h2 { text-align: center; font-size: 28px; letter-spacing: -.02em; margin: 0 0 26px; }
@@ -165,6 +182,15 @@
   <header class="hero">
     <h1>Transformez votre logo en <em>vecteur</em><br>en quelques secondes</h1>
     <p class="lead">PNG ou JPG → SVG, PDF, EPS, DXF. Angles nets, lignes droites, cercles parfaits, couleurs et dégradés conservés. Gratuit et sans inscription.</p>
+    <div class="modes" id="mode" role="radiogroup" aria-label="Mode">
+      <button class="opt on" data-v="vec" role="radio" aria-checked="true"><b>Vectoriser</b><small>PNG/JPG → SVG, PDF, EPS, DXF</small></button>
+      <button class="opt" data-v="rbvec" role="radio" aria-checked="false"><b>Supprimer le fond + vectoriser</b><small>Fond retiré, puis vecteur transparent</small></button>
+      <button class="opt" data-v="rb" role="radio" aria-checked="false"><b>Supprimer le fond</b><small>Sans vectorisation : PNG transparent (DTF, impression)</small></button>
+    </div>
+    <div class="tolbox" id="tolbox"><span>Tolérance du fond</span>
+      <select id="tol"><option value="low">Faible</option><option value="normal" selected>Normale</option><option value="high">Forte</option></select>
+      <span>· fond uni ou damier « faux transparent »</span>
+    </div>
     <label id="drop" for="file">
       <div class="icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 16V4"/><path d="m7 9 5-5 5 5"/><path d="M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg></div>
       <strong>Déposez votre image ici</strong>
@@ -238,6 +264,42 @@
     </div>
   </section>
 
+  <section id="rb" class="card" aria-live="polite">
+    <div class="toolbar">
+      <label title="Plus fort : retire plus de nuances proches du fond. Plus faible : protège les bords clairs du logo.">Tolérance
+        <select id="tol2"><option value="low">Faible</option><option value="normal" selected>Normale</option><option value="high">Forte</option></select>
+      </label>
+      <div class="group"><span class="lbl">Aperçu sur</span>
+        <div class="seg" id="rbBg"><button data-b="checker" class="on">Damier</button><button data-b="white">Blanc</button><button data-b="black">Noir</button><button data-b="green">Vert</button></div>
+      </div>
+      <div class="spacer"></div>
+      <div class="group"><span class="lbl">Zoom</span>
+        <div class="seg" id="rbZoom"><button data-z="fit" class="on">Ajuster</button><button data-z="2">200%</button><button data-z="4">400%</button></div>
+      </div>
+    </div>
+    <div class="panes">
+      <div class="pane"><h3>Original</h3><div class="view" id="rbViewA"><div class="inner"><img id="rbOrig" alt="Image originale"></div></div></div>
+      <div class="pane"><h3>Sans fond</h3><div class="view" id="rbViewB"><div class="inner"><img id="rbImg" alt="Logo sans fond"></div></div></div>
+    </div>
+    <div class="stats" id="rbStats"></div>
+    <div class="dl">
+      <div class="dl-head"><h2>Télécharger</h2><span class="sub" id="rbSub"></span></div>
+      <div class="dl-foot">
+        <div class="group"><span class="lbl">Taille du PNG</span>
+          <div class="seg" id="rbScale"><button data-s="1">1×</button><button data-s="2">2×</button><button data-s="4" class="on">4×</button></div>
+        </div>
+        <span class="lbl" id="rbSize"></span>
+        <div class="spacer"></div>
+        <button class="btn" id="rbAgain">Nouvelle image</button>
+        <button class="btn" id="rbToVec">Vectoriser ce logo</button>
+        <button class="btn primary" id="rbDl">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v12"/><path d="m7 11 5 5 5-5"/><path d="M4 20h16"/></svg>
+          Télécharger le PNG transparent
+        </button>
+      </div>
+    </div>
+  </section>
+
   <section class="info" id="comment">
     <h2>Comment ça marche</h2>
     <div class="grid3">
@@ -261,6 +323,7 @@
     <details class="card faq"><summary>Quel format choisir ?</summary><p>SVG pour le web et la plupart des logiciels (Illustrator, Inkscape, Figma, Canva). PDF pour l'imprimeur. EPS pour les anciens logiciels d'impression. DXF pour la CAO, la CNC et la découpe laser. PNG pour une image nette en très grande taille.</p></details>
     <details class="card faq"><summary>Mon logo a des dégradés, ça marche ?</summary><p>Oui : les dégradés sont transformés en bandes de couleurs unies. Choisissez « Auto » pour rester fidèle à l'original, ou un petit nombre de couleurs (3 à 6) pour un rendu plus simple et plus léger.</p></details>
     <details class="card faq"><summary>Mes images sont-elles envoyées quelque part ?</summary><p>Non. La vectorisation se fait entièrement sur votre ordinateur ou votre téléphone. L'image ne quitte jamais votre appareil.</p></details>
+    <details class="card faq"><summary>Comment supprimer le fond d'un logo (même le damier « faux transparent ») ?</summary><p>Choisissez « Supprimer le fond » pour un PNG transparent sans vectorisation (idéal pour le DTF et l'impression), ou « Supprimer le fond + vectoriser » pour un vecteur transparent. Le fond uni ou le damier gris et blanc incrusté dans l'image est retiré ; les parties blanches à l'intérieur du logo sont conservées. Si un bord clair du logo disparaît, passez la tolérance sur « Faible ».</p></details>
     <details class="card faq"><summary>Comment obtenir le meilleur résultat ?</summary><p>Utilisez l'image la plus grande et la plus nette possible, de préférence l'original plutôt qu'une capture d'écran.</p></details>
   </section>
 
@@ -268,11 +331,14 @@
 </div>
 
 <script src="exporters.js?v=202609290013"></script>
+<script src="bgremove.js?v=202609290100"></script>
 <script>
 (() => {
   const $ = (id) => document.getElementById(id);
   const MAX_SIDE = 3000, MAX_PIXELS = 6_000_000;
-  const state = { data: null, name: 'logo', zoom: 'fit', origUrl: null, file: null, fmt: 'svg', use: 'general', scale: 4 };
+  const state = { data: null, name: 'logo', zoom: 'fit', origUrl: null, file: null, fmt: 'svg', use: 'general', scale: 4,
+    mode: 'vec', rb: null, rbScale: 4, rbZoom: 'fit' };
+  const nextFrame = () => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
   const FMT_LABEL = { svg: 'SVG', pdf: 'PDF', dxf: 'DXF', eps: 'EPS', png: 'PNG' };
 
   function setStatus(text, kind) {
@@ -282,9 +348,9 @@
   }
   function clearStatus() { $('status').classList.remove('show', 'error'); }
 
-  async function decode(file) {
+  async function decode(file, maxSide = MAX_SIDE, maxPixels = MAX_PIXELS) {
     const img = await createImageBitmap(file);
-    const k = Math.min(1, MAX_SIDE / Math.max(img.width, img.height), Math.sqrt(MAX_PIXELS / (img.width * img.height)));
+    const k = Math.min(1, maxSide / Math.max(img.width, img.height), Math.sqrt(maxPixels / (img.width * img.height)));
     const w = Math.max(1, Math.round(img.width * k)), h = Math.max(1, Math.round(img.height * k));
     const c = document.createElement('canvas'); c.width = w; c.height = h;
     const ctx = c.getContext('2d', { willReadFrequently: true });
@@ -295,7 +361,7 @@
 
   function runWorker(img, onProgress) {
     return new Promise((resolve, reject) => {
-      const worker = new Worker('worker.js?v=202609290013');
+      const worker = new Worker('worker.js?v=202609290100');
       worker.onmessage = (e) => {
         const m = e.data;
         if (m.type === 'progress') onProgress(m.msg);
@@ -310,16 +376,24 @@
     state.file = file;
     if (!file || !file.type.startsWith('image/')) { setStatus('Choisissez une image PNG, JPG ou WebP.', 'error'); return; }
     state.name = (file.name || 'logo').replace(/\.[^.]+$/, '') || 'logo';
-    $('result').classList.remove('show');
+    $('result').classList.remove('show'); $('rb').classList.remove('show');
     const t0 = performance.now();
     let stage = 'Lecture de l’image…';
     const show = () => setStatus(`${stage} ${((performance.now() - t0) / 1000).toFixed(0)} s`);
     show();
     const tick = setInterval(show, 1000);
     try {
-      const img = await decode(file);
       if (state.origUrl) URL.revokeObjectURL(state.origUrl);
       state.origUrl = URL.createObjectURL(file);
+      if (state.mode === 'rb') { await handleRemoveOnly(file, (m) => { stage = m; show(); }); return; }
+      let img = await decode(file);
+      let removed = false;
+      if (state.mode === 'rbvec') {
+        stage = 'Suppression du fond…'; show(); await nextFrame();
+        const r = BgRemove.removeBackground(img.rgba, img.width, img.height, { tolerance: $('tol').value });
+        img = { rgba: BgRemove.flatten(img.rgba, img.width, img.height, r.alpha).rgba, width: img.width, height: img.height };
+        removed = true;
+      }
       stage = 'Vectorisation…'; show();
       const json = await runWorker(img, (msg) => { stage = msg; show(); });
       // layered model: one path (d) per colour, from the engine's SVG
@@ -327,7 +401,7 @@
       json.layers = [...doc.querySelectorAll('path')].map((p) => ({ color: p.getAttribute('fill'), d: p.getAttribute('d') }));
       state.data = json;
       $('colors').innerHTML = json.layers.map((l, i) => `<input type="color" data-layer="${i}" value="${l.color}" title="Couleur ${i + 1}">`).join('');
-      $('bg').value = json.bg; $('transparent').checked = false;
+      $('bg').value = removed ? '#ffffff' : json.bg; $('transparent').checked = removed;
       $('orig').src = state.origUrl;
       const nc = json.layers.length;
       $('stats').innerHTML = `<span><b>${json.width} × ${json.height}</b> px</span><span><b>${nc}</b> couleur${nc > 1 ? 's' : ''}</span><span><b>${json.shapes}</b> formes</span><span><b>${json.arcs}</b> cercles exacts</span><span>calcul <b>${(json.ms / 1000).toFixed(1)} s</b></span>`;
@@ -340,6 +414,70 @@
       setStatus(e.message && !/decode|source image/i.test(e.message) ? e.message : 'Impossible de lire cette image. Utilisez un PNG, JPG ou WebP.', 'error');
     } finally { clearInterval(tick); }
   }
+
+  // ---------- background removal without vectorisation
+  async function handleRemoveOnly(file, onStage) {
+    const img = await decode(file, 5000, 16_000_000);
+    onStage('Suppression du fond…'); await nextFrame();
+    const r = BgRemove.removeBackground(img.rgba, img.width, img.height, { tolerance: $('tol').value });
+    state.rb = { img, r };
+    onStage('Préparation du PNG…'); await nextFrame();
+    $('rbOrig').src = state.origUrl;
+    await renderRb();
+    const kind = r.checker ? 'damier « faux transparent » détecté' : 'fond uni détecté';
+    $('rbStats').innerHTML = `<span><b>${img.width} × ${img.height}</b> px en entrée</span><span>${kind}</span><span>logo recadré <b>${r.bbox.w} × ${r.bbox.h}</b> px</span>`;
+    $('rbSub').textContent = state.name;
+    clearStatus();
+    $('rb').classList.add('show');
+    rbZoom();
+    $('rb').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+  async function renderRb() {
+    const { img, r } = state.rb;
+    const canvas = BgRemove.compose(img.rgba, img.width, img.height, r.alpha, state.rbScale, r.bbox);
+    state.rb.canvas = canvas;
+    const blob = await new Promise((res) => canvas.toBlob(res, 'image/png'));
+    state.rb.blob = blob;
+    if (state.rb.url) URL.revokeObjectURL(state.rb.url);
+    state.rb.url = URL.createObjectURL(blob);
+    $('rbImg').src = state.rb.url;
+    const cm = (canvas.width / 300 * 2.54).toFixed(1);
+    $('rbSize').textContent = `${canvas.width} × ${canvas.height} px · ${cm} cm de large à 300 DPI`;
+    rbZoom();
+  }
+  function rbZoom() {
+    if (!state.rb || !state.rb.canvas) return;
+    const { r } = state.rb, v = $('rbViewB');
+    // both panes show the same area: the original is cropped visually to the logo box via its full size
+    const cw = state.rb.canvas.width, ch = state.rb.canvas.height;
+    let k;
+    if (state.rbZoom === 'fit') k = Math.min((v.clientWidth - 32) / cw, (v.clientHeight - 32) / ch);
+    else k = +state.rbZoom * r.bbox.w / cw;
+    $('rbImg').style.width = cw * k + 'px'; $('rbImg').style.height = ch * k + 'px';
+    const o = $('rbOrig'), ow = state.rb.img.width, oh = state.rb.img.height;
+    const ko = state.rbZoom === 'fit' ? Math.min((v.clientWidth - 32) / ow, (v.clientHeight - 32) / oh) : +state.rbZoom;
+    o.style.width = ow * ko + 'px'; o.style.height = oh * ko + 'px';
+  }
+  function setMode(v) {
+    state.mode = v;
+    for (const x of $('mode').children) { const on = x.dataset.v === v; x.classList.toggle('on', on); x.setAttribute('aria-checked', on); }
+    $('tolbox').classList.toggle('show', v !== 'vec');
+    $('drop').querySelector('strong').textContent = v === 'vec' ? 'Déposez votre image ici' : 'Déposez votre logo ici';
+  }
+  $('mode').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b || b.dataset.v === state.mode) return;
+    setMode(b.dataset.v);
+    if (state.file) handle(state.file);
+  });
+  const syncTol = (from, to) => $(from).addEventListener('change', () => { $(to).value = $(from).value; if (state.file && state.mode !== 'vec') handle(state.file); });
+  syncTol('tol', 'tol2'); syncTol('tol2', 'tol');
+  segClick('rbBg', (b) => { for (const id of ['rbViewA', 'rbViewB']) { const el = $(id); el.classList.remove('bg-white', 'bg-black', 'bg-green'); if (id === 'rbViewB' && b.dataset.b !== 'checker') el.classList.add('bg-' + b.dataset.b); } });
+  segClick('rbZoom', (b) => { state.rbZoom = b.dataset.z; rbZoom(); });
+  segClick('rbScale', async (b) => { state.rbScale = +b.dataset.s; if (state.rb) await renderRb(); });
+  $('rbDl').addEventListener('click', () => { if (state.rb && state.rb.blob) download(state.rb.blob, `${state.name}-sans-fond@${state.rbScale}x.png`); });
+  $('rbAgain').addEventListener('click', () => { $('rb').classList.remove('show'); window.scrollTo({ top: 0, behavior: 'smooth' }); $('file').value = ''; $('file').click(); });
+  $('rbToVec').addEventListener('click', () => { setMode('rbvec'); window.scrollTo({ top: 0, behavior: 'smooth' }); handle(state.file); });
+  window.addEventListener('resize', rbZoom);
 
   // current model with the user's colour / background choices
   function model() {

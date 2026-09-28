@@ -20,7 +20,7 @@ angles nets, lignes droites, cercles parfaits, courbes lisses.
 2. **Source** : *Deploy from a branch*. **Branch** : `main`, dossier **`/docs`** → **Save**.
 3. Après 1 à 2 minutes, le site est en ligne sur `https://<votre-compte>.github.io/logo-vectorizer/`.
 
-Fichiers : `docs/index.html` (interface), `docs/engine.js` (moteur), `docs/worker.js` (calcul en arrière-plan).
+Fichiers : `docs/index.html` (interface), `docs/engine.js` (moteur), `docs/worker.js` (calcul en arrière-plan), `docs/bgremove.js` (suppression du fond : uni ou damier « faux transparent », avec ou sans vectorisation).
 
 ## Contenu de la version serveur
 
