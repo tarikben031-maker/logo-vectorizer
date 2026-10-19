@@ -8,6 +8,10 @@
  * following (Suzuki) -> Douglas-Peucker polygon -> corner detection + merging of antialias-split
  * corners -> exact straight lines (axis snap) -> exact circular arcs -> Schneider Bezier fitting
  * -> per-shape area safety check.
+ *
+ * Oct 2026: perceptual (CIELAB) palette for flat designs (close pastel shades kept apart, JPEG
+ * noise merged), thin strokes / dots / hairlines kept (sub-pixel ridges), small background-coloured
+ * details kept (dots of i, commas), soft/blurry sources traced smoothly, finer gradient bands.
  */
 (function (root) {
   'use strict';
@@ -24,7 +28,7 @@
     if (illus) { DP_EPS = 0.45; FIT_TOL = 0.5; SMOOTH_MAX = 2.0; ARC_RMAX = 5000; BIG_ARCS = true; }
     else if (style === 'clean') {
       // idealised shapes (vectorizer.ai-like): smoother curves, large exact circles, fewer points
-      DP_EPS = +(ENV('VDP') || 0.26); FIT_TOL = +(ENV('VFT') || 0.34); SMOOTH_MAX = +(ENV('VSM') || 1.1); ARC_RMAX = 25.0; BIG_ARCS = false;
+      DP_EPS = +(ENV('VDP') || 0.26); FIT_TOL = +(ENV('VFT') || 0.34); SMOOTH_MAX = +(ENV('VSM') || 1.1); ARC_RMAX = +(ENV('VAR') || 2000); BIG_ARCS = false;
     }
     else { DP_EPS = 0.2; FIT_TOL = 0.25; SMOOTH_MAX = 0.75; ARC_RMAX = 25.0; BIG_ARCS = false; }
   }
@@ -32,6 +36,10 @@
   const MAX_SUBPIXELS = 110e6;       // memory guard for the supersampled mask
   const DEG = 180 / Math.PI;
 
+  let MIN_WIDTH = 0, FLAT_NEAR = 1e9, SOFT = false, ARC_TS = 1;
+  let RIDGES = !ENV("VNORIDGE"), VALLEYS = true;
+  // gradients: colour step between posterized bands (RGB) and maximum number of bands
+  const GRAD_STEP = +(ENV('VGS') || 16), GRAD_MAX = +(ENV('VGM') || 36);
   let S = 8;                         // supersampling factor (lowered for very large images)
   let ARCS = 0;
   let USE_ARCS = true;
@@ -251,7 +259,7 @@
     if (!f) return null;
     const { c, r, res } = f;
     if (r < 1.2 || r > ARC_RMAX) return null;
-    if (maxOf(res) > Math.min(0.6, Math.max(0.25, 0.035 * r)) || rmsOf(res) > Math.min(0.2, Math.max(0.1, 0.013 * r))) return null;
+    if (maxOf(res) > ARC_TS * Math.min(0.6, Math.max(0.25, 0.035 * r)) || rmsOf(res) > ARC_TS * Math.min(0.2, Math.max(0.1, 0.013 * r))) return null;
     if (!closed) {
       let m = 0; for (const p of pts) m = Math.max(m, Math.abs(Math.hypot(p[0] - c[0], p[1] - c[1]) - r));
       if (m > Math.min(1.2, Math.max(0.9, 0.12 * r))) return null;
@@ -292,7 +300,7 @@
         if (!f) continue;
         const { c, r, res } = f;
         if (r < 1.5 || r > ARC_RMAX) continue;
-        if (maxOf(res) > Math.min(0.6, Math.max(0.25, 0.035 * r)) || rmsOf(res) > Math.min(0.2, Math.max(0.09, 0.012 * r))) continue;
+        if (maxOf(res) > ARC_TS * Math.min(0.6, Math.max(0.25, 0.035 * r)) || rmsOf(res) > ARC_TS * Math.min(0.2, Math.max(0.09, 0.012 * r))) continue;
         const ang = angles(seg, c);
         const sweepNeed = (BIG_ARCS && r > 20) ? Math.min(minSweep, 40 / r) : minSweep;
         if (Math.abs(ang[ang.length - 1] - ang[0]) < sweepNeed) continue;
@@ -303,7 +311,7 @@
       if (best) break;
     }
     if (!best) return null;
-    const { c, r } = best, tol = Math.min(0.6, Math.max(0.25, 0.035 * r));
+    const { c, r } = best, tol = ARC_TS * Math.min(0.6, Math.max(0.25, 0.035 * r));
     const off = (p) => Math.abs(Math.hypot(p[0] - c[0], p[1] - c[1]) - r);
     while (best.i0 > 0 && off(pts[best.i0 - 1]) < tol) best.i0--;
     while (best.i1 < N - 1 && off(pts[best.i1 + 1]) < tol) best.i1++;
@@ -730,7 +738,7 @@
     const SS = S * S, proj = new Float64Array(SS), order = new Array(SS);
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
       const tv = t[y * W + x];
-      if (!(tv > 0.03 && tv < 0.97)) continue;
+      if (SOFT || !(tv > 0.03 && tv < 0.97)) continue;
       const gnx = gx[y * W + x], gny = gy[y * W + x], gn = Math.hypot(gnx, gny) + 1e-9;
       if (!(gn > 0.05)) continue;
       const ux = Math.round(gnx / gn), uy = Math.round(gny / gn);
@@ -742,6 +750,60 @@
       for (let r = 0; r < SS; r++) {
         const s = order[r], si = s % S, sj = (s / S) | 0;
         mask[(y * S + sj) * BW + x * S + si] = r < k ? 1 : 0;
+      }
+    }
+    // hairlines thinner than a pixel (small text, thin rules): a ridge of partial coverage would fall
+    // under the 0.5 threshold and break into dashes. Draw it as a band of the measured width instead.
+    if (RIDGES) for (const valley of (VALLEYS ? [false, true] : [false])) {
+      // valley = thin stroke of the colours *outside* this layer (dark text punched in a light card)
+      const T = valley ? (x, y) => 1 - t[clip(y, 0, H - 1) * W + clip(x, 0, W - 1)] : (x, y) => t[clip(y, 0, H - 1) * W + clip(x, 0, W - 1)];
+      const ink = valley ? 0 : 1;
+      const dirs = [[1, 0], [0, 1], [1, 1], [1, -1]];
+      for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+        const tv = T(x, y);
+        if (!(tv > 0.25 && tv < 0.75)) continue;
+        let best = -1, drop = 0;
+        for (let d = 0; d < 4; d++) {
+          const [dx, dy] = dirs[d], a = T(x - dx, y - dy), b = T(x + dx, y + dy);
+          if (a < tv - 0.08 && b < tv - 0.08 && a < 0.5 && b < 0.5) { const dr = 2 * tv - a - b; if (dr > drop) { drop = dr; best = d; } }
+        }
+        if (best < 0) {
+          // stroke spread over two pixels (each partially covered)
+          for (let d = 0; d < 2; d++) {
+            const [dx, dy] = dirs[d], b2 = T(x + dx, y + dy), a = T(x - dx, y - dy), c = T(x + 2 * dx, y + 2 * dy);
+            const lo = Math.min(tv, b2) - 0.08;
+            if (!(b2 > 0.18 && b2 < 0.85 && a < lo && c < lo && a < 0.4 && c < 0.4)) continue;
+            const w2 = tv + b2 + a + c;
+            if (w2 > 1.7) continue;
+            const cen = (b2 - a + 2 * c) / Math.max(1e-6, w2), half = Math.max(w2, 0.7) / 2;
+            for (let k = 0; k < 2; k++) for (let j = 0; j < S; j++) for (let i = 0; i < S; i++) {
+              const pr = (dx ? off[i] : off[j]) + k;
+              if (Math.abs(pr - cen) <= half) mask[(y * S + j + k * dy * S) * BW + x * S + i + k * dx * S] = ink;
+            }
+          }
+          continue;
+        }
+        let peaks = 0;
+        for (let d = 0; d < 4; d++) { const [ex, ey] = dirs[d]; if (T(x - ex, y - ey) < tv - 0.05 && T(x + ex, y + ey) < tv - 0.05) peaks++; }
+        if (peaks === 4) {
+          const inkSum = tv + T(x - 1, y) + T(x + 1, y) + T(x, y - 1) + T(x, y + 1) + 0.5 * (T(x - 1, y - 1) + T(x + 1, y - 1) + T(x - 1, y + 1) + T(x + 1, y + 1));
+          if (tv < 0.4 || inkSum < 0.75) continue;      // a faint speck is noise, not a dot             // isolated dot (period, dot of an i): a disc of the same ink
+          const rr = Math.sqrt(Math.max(tv + 0.25 * (T(x - 1, y) + T(x + 1, y) + T(x, y - 1) + T(x, y + 1)), 1.3) / Math.PI);
+          for (let j = -S; j < 2 * S; j++) for (let i = -S; i < 2 * S; i++) {
+            const px = (i + 0.5) / S - 0.5, py = (j + 0.5) / S - 0.5;
+            if (px * px + py * py <= rr * rr) { const X = x * S + i, Y = y * S + j; if (X >= 0 && Y >= 0 && X < BW && Y < BH) mask[Y * BW + X] = ink; }
+          }
+          continue;
+        }
+        const [dx, dy] = dirs[best], dn = Math.hypot(dx, dy), nx = dx / dn, ny = dy / dn;
+        // sub-pixel centre of the ridge from the two neighbours (parabola), width = coverage
+        const a = T(x - dx, y - dy), b = T(x + dx, y + dy);
+        const den = a - 2 * tv + b, sh = den < -1e-6 ? clip(0.5 * (a - b) / den, -0.5, 0.5) * dn : 0;
+        const half = Math.max(tv * (best > 1 ? 0.75 : 1), 0.6) / 2;
+        for (let j = 0; j < S; j++) for (let i = 0; i < S; i++) {
+          const pr = nx * off[i] + ny * off[j] - sh;
+          if (Math.abs(pr) <= half) mask[(y * S + j) * BW + x * S + i] = ink;
+        }
       }
     }
     return mask;
@@ -767,19 +829,30 @@
         last = Math.max(last, x1);
       }
     }
-    // vertical pass -> mask (0/1)
-    const col = new Uint8Array(BH), done = new Uint8Array(BH);
-    for (let x = 0; x < BW; x++) {
-      for (let y = 0; y < BH; y++) col[y] = tmp[y * BW + x];
-      done.fill(0);
-      for (let y = 0; y < BH; y++) mask[y * BW + x] = col[y] > 127 ? 1 : 0;
-      for (let y = 1; y < BH; y++) {
-        if (col[y] === col[y - 1]) continue;
-        const y0 = Math.max(0, y - h - 1), y1 = Math.min(BH - 1, y + h);
-        for (let yy = y0; yy <= y1; yy++) {
-          if (done[yy]) continue; done[yy] = 1;
-          let s = 0; for (let k = 0; k < w.length; k++) s += w[k] * col[reflect101(yy + k - h, BH)];
-          mask[yy * BW + x] = s > 127.5 ? 1 : 0;
+    // vertical pass -> mask (0/1), in strips of columns (cache friendly: rows are read contiguously)
+    for (let i = 0; i < BW * BH; i++) mask[i] = tmp[i] > 127 ? 1 : 0;
+    const SW = 64, L = w.length;
+    const strip = new Uint8Array(SW * BH), done = new Uint8Array(BH);
+    for (let x0 = 0; x0 < BW; x0 += SW) {
+      const sw = Math.min(SW, BW - x0);
+      // skip strips without any vertical change
+      let any = false;
+      for (let y = 0; y < BH; y++) {
+        const o = y * BW + x0, so = y * SW;
+        for (let c = 0; c < sw; c++) strip[so + c] = tmp[o + c];
+      }
+      for (let y = 1; y < BH && !any; y++) { const so = y * SW; for (let c = 0; c < sw; c++) if (strip[so + c] !== strip[so - SW + c]) { any = true; break; } }
+      if (!any) continue;
+      for (let c = 0; c < sw; c++) {
+        done.fill(0);
+        for (let y = 1; y < BH; y++) {
+          if (strip[y * SW + c] === strip[(y - 1) * SW + c]) continue;
+          const y0 = Math.max(0, y - h - 1), y1 = Math.min(BH - 1, y + h);
+          for (let yy = y0; yy <= y1; yy++) {
+            if (done[yy]) continue; done[yy] = 1;
+            let s = 0; for (let k = 0; k < L; k++) s += w[k] * strip[reflect101(yy + k - h, BH) * SW + c];
+            mask[yy * BW + x0 + c] = s > 127.5 ? 1 : 0;
+          }
         }
       }
     }
@@ -918,10 +991,10 @@
       const cnt = new Int32Array(C.length); for (let p = 0; p < n; p++) cnt[lab[p]]++;
       return C.filter((_, c) => cnt[c] > Math.max(3, n * 0.0005));
     }
-    const outliers = () => { let o = 0; for (let p = 0; p < n; p++) if (dist[p] > 30) o++; return o / n; };
+    const outliers = () => { let o = 0; for (let p = 0; p < n; p++) if (dist[p] > GRAD_STEP) o++; return o / n; };
     let C;
     if (colors === 'auto' || !colors) {
-      for (let k = 2; k <= 20; k++) { C = kmeans(k); if (outliers() <= 0.0025) break; }
+      for (let k = 2; k <= GRAD_MAX; k++) { C = kmeans(k); if (outliers() <= 0.0025) break; }
     } else {
       C = kmeans(Math.max(2, Math.min(20, +colors + 1)));   // +1: the background
     }
@@ -995,9 +1068,179 @@
     }
     // merge near-identical colours
     let out = [];
-    for (const c of C) if (!out.some((o) => Math.hypot(o[0] - c[0], o[1] - c[1], o[2] - c[2]) < 18)) out.push(c);
+    for (const c of C) if (!out.some((o) => Math.hypot(o[0] - c[0], o[1] - c[1], o[2] - c[2]) < 10)) out.push(c);
     if (colors === 'auto' || !colors) out = mergeInterleaved(rgb, W, H, out);
     return out;
+  }
+
+  // ---------------------------------------------------------------- perceptual palette (CIELAB)
+  // Flat-colour designs often use close pastel shades (cream vs pale pink vs white) that are only
+  // ~20 RGB units apart but clearly different to the eye. Colours are found as modes of the flat
+  // pixels in Lab space (ΔE76), so every visible flat colour gets its own layer.
+  function linF(v) { const c = clip(v, 0, 255) / 255; return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }
+  function labOf(r, g, b) {
+    const R = linF(r), G = linF(g), B = linF(b);
+    let x = (0.4124 * R + 0.3576 * G + 0.1805 * B) / 0.95047, y = 0.2126 * R + 0.7152 * G + 0.0722 * B, z = (0.0193 * R + 0.1192 * G + 0.9505 * B) / 1.08883;
+    const f = (t) => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116);
+    x = f(x); y = f(y); z = f(z);
+    return [116 * y - 16, 500 * (x - y), 200 * (y - z)];
+  }
+  function toLab(rgb, N) {
+    const lab = new Float32Array(N * 3), cache = new Map();
+    for (let i = 0; i < N; i++) {
+      const r = rgb[i * 3], g = rgb[i * 3 + 1], b = rgb[i * 3 + 2];
+      const key = (Math.round(r) << 16) | (Math.round(g) << 8) | Math.round(b);
+      let v = cache.get(key);
+      if (!v) { v = labOf(r, g, b); if (cache.size < 400000) cache.set(key, v); }
+      lab[i * 3] = v[0]; lab[i * 3 + 1] = v[1]; lab[i * 3 + 2] = v[2];
+    }
+    return lab;
+  }
+  const dE = (A, B) => Math.hypot(A[0] - B[0], A[1] - B[1], A[2] - B[2]);
+  // distance (Lab) from colour P to the segment A-B (P = blend of A and B ?)
+  // lo/hi < 0 / > 1 also accept sharpening overshoot (halo darker than the ink, lighter than the paper)
+  function mixDist(P, A, B, lo = 0, hi = 1) {
+    const d0 = A[0] - B[0], d1 = A[1] - B[1], d2 = A[2] - B[2], dd = d0 * d0 + d1 * d1 + d2 * d2;
+    const vx = P[0] - B[0], vy = P[1] - B[1], vz = P[2] - B[2];
+    const t = dd > 0 ? clip((vx * d0 + vy * d1 + vz * d2) / dd, lo, hi) : 0;
+    return Math.hypot(vx - t * d0, vy - t * d1, vz - t * d2);
+  }
+
+  // Returns { pal: [[r,g,b],…] sorted by area, illus: bool } or null when the image is not flat
+  // (gradients / photos), in which case the k-means palette is used.
+  function paletteLab(rgb, W, H, colors) {
+    const N = W * H, lab = toLab(rgb, N);
+    // local variation: max ΔE to the 4 neighbours
+    const vari = new Float32Array(N);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x; let m = 0;
+      const L = lab[i * 3], A = lab[i * 3 + 1], B = lab[i * 3 + 2];
+      const chk = (j) => { const d = Math.hypot(L - lab[j * 3], A - lab[j * 3 + 1], B - lab[j * 3 + 2]); if (d > m) m = d; };
+      if (x > 0) chk(i - 1); if (x < W - 1) chk(i + 1); if (y > 0) chk(i - W); if (y < H - 1) chk(i + W);
+      vari[i] = m;
+    }
+    // noise level (JPEG): residual to a blurred copy, measured in smooth areas only
+    const noise = (() => {
+      const ch = [0, 1, 2].map((k) => { const a = new Float32Array(N); for (let i = 0; i < N; i++) a[i] = lab[i * 3 + k]; return a; });
+      const bl = ch.map((a) => blurFloat(a, W, H, 1.5));
+      const step = Math.max(1, Math.floor(N / 250000)), res = [];
+      for (let y = 2; y < H - 2; y += 1) for (let x = 2 + (y % step); x < W - 2; x += step) {
+        const i = y * W + x;
+        let g = 0;
+        for (let k = 0; k < 3; k++) g += Math.abs(bl[k][i + 2] - bl[k][i - 2]) + Math.abs(bl[k][i + 2 * W] - bl[k][i - 2 * W]);
+        if (g > 3) continue;                             // not a smooth area
+        res.push(Math.hypot(ch[0][i] - bl[0][i], ch[1][i] - bl[1][i], ch[2][i] - bl[2][i]));
+      }
+      if (res.length < 100) return 0;
+      res.sort((a, b) => a - b);
+      return res[Math.floor(res.length * 0.9)];
+    })();
+    const FLAT = Math.max(2.5, 3 * noise);
+    const R = clip(3 + 1.5 * noise, 3, 9);             // cluster radius (ΔE)
+    // flat pixels: low variation in their whole 3x3 neighbourhood (excludes antialiased edges)
+    const flat = new Uint8Array(N);
+    let nflat = 0;
+    for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+      const i = y * W + x; let ok = 1;
+      for (let dy = -1; dy <= 1 && ok; dy++) for (let dx = -1; dx <= 1; dx++) if (vari[i + dy * W + dx] > FLAT) { ok = 0; break; }
+      if (ok) { flat[i] = 1; nflat++; }
+    }
+    if (nflat < Math.max(200, N * 0.05)) return null;
+    // histogram of flat pixels in Lab bins (1 ΔE)
+    const bins = new Map();
+    for (let i = 0; i < N; i++) if (flat[i]) {
+      const key = (Math.round(lab[i * 3] * 1.0) + 10) * 1e6 + (Math.round(lab[i * 3 + 1]) + 200) * 1e3 + (Math.round(lab[i * 3 + 2]) + 200);
+      let e = bins.get(key);
+      if (!e) { e = [0, 0, 0, 0]; bins.set(key, e); }
+      e[0]++; e[1] += lab[i * 3]; e[2] += lab[i * 3 + 1]; e[3] += lab[i * 3 + 2];
+    }
+    const B = [...bins.values()].map((e) => [e[1] / e[0], e[2] / e[0], e[3] / e[0], e[0]]).sort((p, q) => q[3] - p[3]);
+    const used = new Uint8Array(B.length);
+    const minCount = Math.max(25, nflat * 0.00015);
+    const clusters = [];
+    for (let s = 0; s < B.length && clusters.length < 40; s++) {
+      if (used[s]) continue;
+      let c = [B[s][0], B[s][1], B[s][2]], cnt = 0;
+      for (let it = 0; it < 4; it++) {          // mean shift
+        const m = [0, 0, 0]; cnt = 0;
+        for (let q = 0; q < B.length; q++) { if (used[q]) continue; const b = B[q]; if (Math.hypot(b[0] - c[0], b[1] - c[1], b[2] - c[2]) <= R) { m[0] += b[0] * b[3]; m[1] += b[1] * b[3]; m[2] += b[2] * b[3]; cnt += b[3]; } }
+        if (!cnt) break;
+        c = [m[0] / cnt, m[1] / cnt, m[2] / cnt];
+      }
+      let tight = 0, ss = 0;
+      for (let q = 0; q < B.length; q++) { if (used[q]) continue; const b = B[q], d = Math.hypot(b[0] - c[0], b[1] - c[1], b[2] - c[2]); if (d <= R) { used[q] = 1; ss += d * d * b[3]; if (d <= R * 0.45) tight += b[3]; } }
+      if (cnt < minCount) continue;
+      clusters.push({ lab: c, n: cnt, tight, spread: Math.sqrt(ss / cnt) });
+    }
+    if (!clusters.length) return null;
+    // gradients spread pixels evenly over colour space; flat designs sit tightly on a few colours
+    const tot = clusters.reduce((s, c) => s + c.n, 0), tightTot = clusters.reduce((s, c) => s + c.tight, 0);
+    const big = clusters.filter((c) => c.n > tot * 0.004).length;
+    if (tightTot / tot < 0.8 || big > 14) return null;
+    // colour noise (JPEG) seen as the spread of the colours other than the main one
+    let nz = 0, nw = 0;
+    for (const c of clusters.slice(1)) { nz += c.spread * c.n; nw += c.n; }
+    const cnoise = nw ? nz / nw : 0;
+    // ramps: a cluster that is a blend of two bigger ones and has no solid core is an antialiasing band;
+    // satellites: a small cluster right next to a much bigger one is compression noise of that colour
+    const keep = [];
+    for (const c of clusters) {
+      if (keep.some((k) => dE(k.lab, c.lab) < 10 && c.n < 0.05 * k.n)) continue;
+      let ramp = false;
+      for (let u = 0; u < keep.length && !ramp; u++) for (let v = u + 1; v < keep.length && !ramp; v++)
+        if (mixDist(c.lab, keep[u].lab, keep[v].lab) < 2.0 && c.n < 0.02 * tot) ramp = true;
+      if (!ramp && !keep.some((k) => dE(k.lab, c.lab) < Math.max(3, 2.2 * noise))) keep.push(c);
+    }
+    let pal = keep;
+    if (colors && colors !== 'auto') pal = pal.slice(0, Math.max(2, Math.min(20, +colors + 1)));
+    else pal = pal.slice(0, 20);
+    // back to RGB: mean of the flat pixels of each colour (exact source colours)
+    const acc = pal.map(() => [0, 0, 0, 0]);
+    for (let i = 0; i < N; i++) if (flat[i]) {
+      const P = [lab[i * 3], lab[i * 3 + 1], lab[i * 3 + 2]];
+      let best = -1, bd = R;
+      for (let c = 0; c < pal.length; c++) { const d = dE(P, pal[c].lab); if (d < bd) { bd = d; best = c; } }
+      if (best >= 0) { const a = acc[best]; a[0]++; a[1] += rgb[i * 3]; a[2] += rgb[i * 3 + 1]; a[3] += rgb[i * 3 + 2]; }
+    }
+    const out = [];
+    pal.forEach((c, k) => { const a = acc[k]; if (a[0] > 0) out.push([a[1] / a[0], a[2] / a[0], a[3] / a[0]]); });
+    // thin strokes of their own colour (no flat pixels): pixels that are no blend of two palette colours
+    if (!colors || colors === 'auto') {
+      const pl = out.map((c) => labOf(c[0], c[1], c[2]));
+      const FAR = 12 + 2.5 * noise + 5 * cnoise;
+      const step = Math.max(1, Math.floor(N / 300000));
+      let far = [];
+      for (let i = 0; i < N; i += step) {
+        if (flat[i]) continue;
+        const P = [lab[i * 3], lab[i * 3 + 1], lab[i * 3 + 2]];
+        let e = Infinity;
+        for (let u = 0; u < pl.length && e > FAR; u++) for (let v = u; v < pl.length; v++) { e = Math.min(e, mixDist(P, pl[u], pl[v], -0.3, 1.3)); if (e <= FAR) break; }
+        if (e > FAR) far.push(i);
+      }
+      const minN = Math.max(20, (N / step) * 0.0003);
+      for (let round = 0; round < 4 && far.length >= minN && out.length < 20; round++) {
+        let seed = -1, bestN = -1;
+        const st = Math.max(1, Math.floor(far.length / 300));
+        for (let a = 0; a < far.length; a += st) {
+          let cnt = 0; const ia = far[a];
+          for (const j of far) if (Math.hypot(lab[ia * 3] - lab[j * 3], lab[ia * 3 + 1] - lab[j * 3 + 1], lab[ia * 3 + 2] - lab[j * 3 + 2]) < 8) cnt++;
+          if (cnt > bestN) { bestN = cnt; seed = ia; }
+        }
+        if (bestN < minN) break;
+        const m = [0, 0, 0]; let c = 0;
+        for (const j of far) if (Math.hypot(lab[seed * 3] - lab[j * 3], lab[seed * 3 + 1] - lab[j * 3 + 1], lab[seed * 3 + 2] - lab[j * 3 + 2]) < 8) { m[0] += rgb[j * 3]; m[1] += rgb[j * 3 + 1]; m[2] += rgb[j * 3 + 2]; c++; }
+        const nc = [m[0] / c, m[1] / c, m[2] / c], nl = labOf(nc[0], nc[1], nc[2]);
+        if (!pl.some((q) => dE(q, nl) < (cnoise > 0.3 ? 25 : 12))) { out.push(nc); }
+        pl.push(nl);
+        far = far.filter((j) => {
+          const P = [lab[j * 3], lab[j * 3 + 1], lab[j * 3 + 2]];
+          for (let u = 0; u < pl.length; u++) for (let v = u; v < pl.length; v++) if (mixDist(P, pl[u], pl[v], -0.3, 1.3) <= FAR) return false;
+          return true;
+        });
+      }
+    }
+    if (ENV('VDBG')) console.error('noise', noise.toFixed(2), 'cnoise', cnoise.toFixed(2), 'R', R.toFixed(1), 'clusters', clusters.map((c) => c.n + ':' + c.lab.map((v) => v.toFixed(0)).join(',')).join(' | '));
+    return { pal: out, noise, cnoise };
   }
 
   // Two close colours whose pixels are interleaved (noise / compression) are one colour.
@@ -1099,6 +1342,7 @@
       for (let c = 0; c < K; c++) { const d = (rgb[i * 3] - pal[c][0]) ** 2 + (rgb[i * 3 + 1] - pal[c][1]) ** 2 + (rgb[i * 3 + 2] - pal[c][2]) ** 2; if (d < bd) { bd = d; best = c; } }
       lbl[i] = best;
     }
+    const lbl0 = lbl.slice();                    // raw nearest colour (keeps thin strokes)
     const cnt = new Int32Array(K);
     for (let pass = 0; pass < 2; pass++) {
       const out = lbl.slice();
@@ -1122,7 +1366,9 @@
         const d = Math.abs(rgb[i * 3] - rgb[j * 3]) + Math.abs(rgb[i * 3 + 1] - rgb[j * 3 + 1]) + Math.abs(rgb[i * 3 + 2] - rgb[j * 3 + 2]);
         if (d > dmax) dmax = d;
       }
-      flat[i] = dmax <= 30 ? 1 : 0;
+      // a flat pixel must also *be* a palette colour: slow blurry ramps are flat-ish but are blends
+      const pc = pal[lbl0[i]];
+      flat[i] = dmax <= 30 && Math.hypot(rgb[i * 3] - pc[0], rgb[i * 3 + 1] - pc[1], rgb[i * 3 + 2] - pc[2]) <= FLAT_NEAR ? 1 : 0;
     }
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
       const i = y * W + x;
@@ -1130,7 +1376,12 @@
       let nflat = 0;
       for (let dy = -3; dy <= 3; dy++) { const yy = y + dy; if (yy < 0 || yy >= H) continue;
         for (let dx = -3; dx <= 3; dx++) { const xx = x + dx; if (xx < 0 || xx >= W) continue;
-          const j = yy * W + xx; if (flat[j]) { present[lbl[j]] = 1; nflat++; } } }
+          const j = yy * W + xx; if (flat[j]) { present[FLAT_NEAR <= 14 ? lbl0[j] : lbl[j]] = 1; nflat++; } } }
+      if (!nflat) {
+        // wide blurry edge: the nearest flat colours on both sides, further away
+        for (let dy = -6; dy <= 6; dy++) { const yy = y + dy; if (yy < 0 || yy >= H) continue;
+          for (let dx = -6; dx <= 6; dx++) { const xx = x + dx; if (xx < 0 || xx >= W) continue; const j = yy * W + xx; if (flat[j]) { present[FLAT_NEAR <= 14 ? lbl0[j] : lbl[j]] = 1; nflat++; } } }
+      }
       if (!nflat) {
         for (let dy = -2; dy <= 2; dy++) { const yy = y + dy; if (yy < 0 || yy >= H) continue;
           for (let dx = -2; dx <= 2; dx++) { const xx = x + dx; if (xx < 0 || xx >= W) continue; present[lbl[yy * W + xx]] = 1; } }
@@ -1147,8 +1398,18 @@
           e = Math.min(e, (vx - t * d0) ** 2 + (vy - t * d1) ** 2 + (vz - t * d2) ** 2);
         }
         if (e > 30 * 30) {
+          // blurry edges are wider than the 7x7 window: look for flat colours further away
+          for (let dy = -6; dy <= 6; dy += 2) { const yy = y + dy; if (yy < 0 || yy >= H) continue;
+            for (let dx = -6; dx <= 6; dx += 2) { const xx = x + dx; if (xx < 0 || xx >= W) continue; const j = yy * W + xx; if (flat[j]) present[FLAT_NEAR <= 14 ? lbl0[j] : lbl[j]] = 1; } }
           for (let dy = -2; dy <= 2; dy++) { const yy = y + dy; if (yy < 0 || yy >= H) continue;
             for (let dx = -2; dx <= 2; dx++) { const xx = x + dx; if (xx < 0 || xx >= W) continue; present[lbl[yy * W + xx]] = 1; } }
+          // thin strokes (1-2 px) vanish in the denoised labels: their own nearest colour is a candidate
+          for (let dy = -1; dy <= 1; dy++) { const yy = y + dy; if (yy < 0 || yy >= H) continue;
+            for (let dx = -1; dx <= 1; dx++) { const xx = x + dx; if (xx < 0 || xx >= W) continue;
+              const c0 = lbl0[yy * W + xx]; if (present[c0]) continue;
+              // a shade next to a present colour is antialiasing / blur, not a thin stroke of its own
+              let near = false; for (let c = 0; c < K && !near; c++) if (present[c] && Math.hypot(pal[c][0] - pal[c0][0], pal[c][1] - pal[c0][1], pal[c][2] - pal[c0][2]) < 30) near = true;
+              if (!near) present[c0] = 1; } }
         }
       }
       const cl = []; for (let c = 0; c < K; c++) if (present[c]) cl.push(c);
@@ -1189,12 +1450,26 @@
       for (let i = 0; i < c.length; i++) { const p = c[i], q = c[(i + 1) % c.length]; a2 += p[0] * q[1] - q[0] * p[1]; }
       const areaPx = Math.abs(a2 / 2);
       if (areaPx < S * S * minArea) continue;
+      if (MIN_WIDTH > 0) {            // noisy (JPEG) images: drop thin slivers and specks of noise
+        let per = 0;
+        for (let i = 0; i < c.length; i++) { const p = c[i], q = c[(i + 1) % c.length]; per += Math.hypot(p[0] - q[0], p[1] - q[1]); }
+        const aPx = areaPx / S / S, width = 2 * aPx / Math.max(1e-9, per / S);
+        if (aPx < 12 || width < MIN_WIDTH) continue;
+      }
       if (fillGaps && c.hole) {
         // gap filler: tiny or very thin background slivers between colours (JPEG halos)
         let per = 0;
         for (let i = 0; i < c.length; i++) { const p = c[i], q = c[(i + 1) % c.length]; per += Math.hypot(p[0] - q[0], p[1] - q[1]); }
         const aPx = areaPx / S / S, width = 2 * aPx / Math.max(1e-9, per / S);
-        if (aPx < 6 || (aPx < 60 && width < 1.3)) continue;
+        if (aPx < 6 || (aPx < 60 && width < 1.3)) {
+          // real details in the background colour (dot of an i, comma) contain solid background pixels
+          let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+          for (const p of c) { if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0]; if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1]; }
+          let tmin = 1;
+          for (let yy = Math.max(0, Math.floor(y0 / S)); yy <= Math.min(H - 1, Math.floor(y1 / S)); yy++)
+            for (let xx = Math.max(0, Math.floor(x0 / S)); xx <= Math.min(W - 1, Math.floor(x1 / S)); xx++) tmin = Math.min(tmin, t[yy * W + xx]);
+          if (!(tmin < 0.3 && MIN_WIDTH === 0)) continue;
+        }
       }
       const a0 = areaPx / S / S;
       const raw = c.map((p) => [(p[0] + 0.5) / S, (p[1] + 0.5) / S]);
@@ -1235,15 +1510,36 @@
       for (let c = 0; c < 3; c++) rgb[i * 3 + c] = rgba[i * 4 + c] * a + bgc[c] * (1 - a);
     }
     progress('Détection des couleurs…');
-    let pal = choosePalette(rgb, W, H, colorsOpt);
-    // put the background colour first (closest palette colour to the border colour)
+    const flatPal = ENV('VOLDPAL') ? null : paletteLab(rgb, W, H, colorsOpt);
+    let pal = flatPal ? flatPal.pal : choosePalette(rgb, W, H, colorsOpt);
+    // background = the palette colour most frequent along the border
     let bi = 0, bd = Infinity;
-    pal.forEach((c, i) => { const d = Math.hypot(c[0] - bgc[0], c[1] - bgc[1], c[2] - bgc[2]); if (d < bd) { bd = d; bi = i; } });
+    {
+      const votes = new Float64Array(pal.length), near = new Float64Array(pal.length);
+      const vote = (x, y) => {
+        const o = (y * W + x) * 3; let b = 0, m = Infinity;
+        for (let c = 0; c < pal.length; c++) { const d = Math.hypot(rgb[o] - pal[c][0], rgb[o + 1] - pal[c][1], rgb[o + 2] - pal[c][2]); if (d < m) { m = d; b = c; } }
+        votes[b]++; near[b] += m;
+      };
+      for (let x = 0; x < W; x++) { vote(x, 0); vote(x, H - 1); }
+      for (let y = 1; y < H - 1; y++) { vote(0, y); vote(W - 1, y); }
+      for (let c = 0; c < pal.length; c++) if (votes[c] > votes[bi]) bi = c;
+      bd = near[bi] / Math.max(1, votes[bi]);
+      if (amean < 0.999 && median(topBottomAlpha) < 128) {
+        bd = Infinity;
+        pal.forEach((c, i) => { const d = Math.hypot(c[0] - bgc[0], c[1] - bgc[1], c[2] - bgc[2]); if (d < bd) { bd = d; bi = i; } });
+      }
+    }
     if (bd > 40) { pal.unshift(bgc.slice()); bi = 0; }
     pal = [pal[bi]].concat(pal.filter((_, i) => i !== bi));
     if (pal.length < 2) throw new Error("L'image ne contient pas de logo visible (une seule couleur).");
     const K0 = pal.length;
-    const illus = K0 > 5;                         // many colours: gradients / illustration
+    const illus = flatPal ? false : K0 > 5;
+    // clean (lossless) flat images: no smoothing of the colour layers (it would erase thin strokes)
+    const noisy = !!flatPal && (flatPal.cnoise > 0.3 || flatPal.noise > 0.8);
+    MIN_WIDTH = noisy ? 1.5 : 0;
+    FLAT_NEAR = flatPal ? (noisy ? 30 : 14) : 1e9;
+    let layerBlur = flatPal ? (flatPal.cnoise > 0.3 || flatPal.noise > 0.8 ? 0.5 : 0) : LAYER_BLUR;                         // many colours: gradients / illustration
     setProfile(illus, styleOpt);
     let ia, ib, al, tsil = null;
     if (illus) {
@@ -1323,6 +1619,24 @@
     }
     // stacking order: largest colours at the bottom, smaller details on top
     const tsilSmooth = illus ? blurFloat(tsil, W, H, 0.6) : null;
+    // soft / blurry source (upscaled screenshot, photo of a print): edges several pixels wide.
+    // Measured as blended pixels per unit of boundary length; such images get smoother tracing.
+    let softness = 0;
+    if (!illus) {
+      let blend = 0, bnd = 0;
+      const hard = (i) => (al[i] >= 0.5 ? ia[i] : ib[i]);
+      for (let y = 0; y < H - 1; y++) for (let x = 0; x < W - 1; x++) {
+        const i = y * W + x, c = hard(i);
+        if (ia[i] !== ib[i] && al[i] > 0.1 && al[i] < 0.9) blend++;
+        if (hard(i + 1) !== c) bnd++;
+        if (hard(i + W) !== c) bnd++;
+      }
+      softness = bnd ? blend / bnd : 0;
+      if (ENV('VDBG')) console.error('softness', softness.toFixed(2));
+    }
+    const soft = softness > +(ENV('VSOFT') || 1.6);
+    SOFT = soft; ARC_TS = soft ? +(ENV('VATS') || 2) : 1;
+    if (soft) { DP_EPS = 0.4; FIT_TOL = 0.45; SMOOTH_MAX = 1.8; layerBlur = Math.max(layerBlur, +(ENV('VSB') || 1.0)); }
     const K = pal.length, weight = new Float64Array(K);
     for (let i = 0; i < N; i++) { weight[ia[i]] += al[i]; weight[ib[i]] += 1 - al[i]; }
     let order = [...Array(K).keys()].slice(1).sort((p, q) => weight[q] - weight[p]);
@@ -1331,6 +1645,7 @@
       minGap = Math.min(minGap, Math.hypot(pal[a][0] - pal[b][0], pal[a][1] - pal[b][1], pal[a][2] - pal[b][2]));
     // clearly distinct colours (not shades of one gradient): own-colour layers, thin strokes on top
     const flatStack = !illus && K > 2 && minGap > 70;
+    VALLEYS = !flatStack;            // own-colour layers: holes may be upper colours (gap-filled), never carve them
     if (flatStack) {
       // flat colours: thick fills at the bottom, thin strokes on top (their own edges stay visible)
       const area = new Float64Array(K), per = new Float64Array(K);
@@ -1358,7 +1673,7 @@
         if (L === 0) t.set(tsilSmooth);
         else { const tb = blurFloat(t, W, H, 0.9); for (let i = 0; i < N; i++) t[i] = Math.min(tb[i], tsilSmooth[i]); }
       } else if (K0 > 2) {
-        if (!flatStack && LAYER_BLUR > 0) t.set(blurFloat(t, W, H, LAYER_BLUR));     // removes burrs from colour noise
+        if (!flatStack && layerBlur > 0) t.set(blurFloat(t, W, H, layerBlur));     // removes burrs from colour noise
         if (flatStack) {
           // own colour only, then gap filler: extend by <= 2 px into upper colours / the halo next to them
           const own = new Float32Array(N), up = new Float32Array(N);
@@ -1366,7 +1681,7 @@
             own[i] = al[i] * (rank[ia[i]] === L ? 1 : 0) + (1 - al[i]) * (rank[ib[i]] === L ? 1 : 0);
             up[i] = al[i] * (rank[ia[i]] > L ? 1 : 0) + (1 - al[i]) * (rank[ib[i]] > L ? 1 : 0);
           }
-          const ob = LAYER_BLUR > 0 ? blurFloat(own, W, H, LAYER_BLUR) : own;
+          const ob = layerBlur > 0 ? blurFloat(own, W, H, layerBlur) : own;
           if (L < order.length - 1) {
             const mine = maxFilter(ob, W, H, 2), near = L === 0 ? maxFilter(up, W, H, 1) : up;
             for (let i = 0; i < N; i++) t[i] = Math.max(ob[i], Math.min(mine[i], near[i]));
